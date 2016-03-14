@@ -1,4 +1,4 @@
-// saw_io.h - Really basic collision detection between 2d primitives
+// saw_io.h - Io abstraction including file and memory implementations
 //
 // This is free and unencumbered software released into the public domain.
 // 
