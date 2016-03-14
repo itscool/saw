@@ -23,7 +23,7 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
-// - v1.00 - 03/12/16 - Initial release by achild
+// - v1.00 - 03/12/16 - Initial release by Scott Williams
 
 //-----------------------------------------------------------------------------------------------------------
 // Notes
@@ -55,11 +55,11 @@ enum IoAccessType {
 
 struct Io {
 	void *handle;
-	bool(*funcRead)(void *, size_t, void *);
-	bool(*funcWrite)(void *, size_t, const void *);
-	bool(*funcSeek)(void *, IoSeekType, long long);
-	long long(*funcTell)(void *);
-	void(*funcClose)(void *);
+	bool (*funcRead)(void *, size_t, void *);
+	bool (*funcWrite)(void *, size_t, const void *);
+	bool (*funcSeek)(void *, IoSeekType, long long);
+	long long (*funcTell)(void *);
+	void (*funcClose)(void *);
 };
 
 bool IoOpenFile(Io *io, const char *filename, IoAccessType access);
@@ -661,10 +661,10 @@ void IoWriteSVbe(const Io *io, const char *format, va_list v) {
 
 //-----------------------------------------------------------------------------------------------------------
 void IoWriteSbe(const Io *io, const char *format, ...) {
-   va_list v;
-   va_start(v, format);
-   IoWriteSVbe(io, format, v);
-   va_end(v);
+	va_list v;
+	va_start(v, format);
+	IoWriteSVbe(io, format, v);
+	va_end(v);
 }
 
 //-----------------------------------------------------------------------------------------------------------
