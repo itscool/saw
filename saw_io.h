@@ -1,4 +1,7 @@
 // saw_io.h - Io abstraction including file and memory implementations
+//          - Bit streaming
+//          - Bit twiddling and byte swapping
+//          - Cross platform file system manipulation
 //
 // This is free and unencumbered software released into the public domain.
 // 
@@ -23,6 +26,8 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.02 - 03/17/16 - Merged with bit streaming, bit twiddling, byte swapping libraries
+//                    - Merged with file system manipulation library
 // - v1.01 - 03/17/16 - Fixed treat C-string like std::string in linux IoOpenFile
 // - v1.00 - 03/12/16 - Initial release by Scott Williams
 
@@ -31,6 +36,11 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // Todo
+// @@ (Fs) Better error reporting (besides true/false)
+// @@ (Fs) Hand-written code for Windows version of FsDeleteDir so we can handle errors
+// @@ (Fs) FsGetRelPath(fullPathFrom, fullPathTo)
+// @@ (Fs) FsEnum(fullPath)
+// @@ (Fs) FsWatch(fullPath)
 
 #ifndef _SAW_IO_H_INCLUDED
 #define _SAW_IO_H_INCLUDED
@@ -62,11 +72,29 @@ struct Io {
 	void (*funcClose)(void *);
 };
 
+struct BitStreamIn {
+	const unsigned char *pBase;
+	const unsigned char *pPos;
+	unsigned int hasBits;
+	unsigned int currBits;
+	unsigned int bytesLeft;
+};
+
+struct BitStreamOut {
+	unsigned char *pBase;
+	unsigned char *pPos;
+	unsigned int hasBits;
+	unsigned int currBits;
+	unsigned int bytesLeft;
+};
+
+// Io implementations
 bool IoOpenFile(Io *io, const char *filename, IoAccessType access);
 bool IoOpenMem(Io *io, const void *pMem, size_t size);
 bool IoOpenVec(Io *io, std::vector<char> *pVec);
 inline void IoClose(const Io *io);
 
+// Io abstraction
 inline bool IoSeek(const Io *io, IoSeekType type, long long offset);
 inline bool IoSkip(const Io *io, long long offset);
 inline long long IoSize(const Io *io);
@@ -105,6 +133,66 @@ void IoWriteSVbe(const Io *io, const char *format, va_list v);
 void IoWriteSbe(const Io *io, const char *format, ...);
 void IoWriteText8(const Io *io, const char *in, bool includeNull);
 void IoWriteLine8(const Io *io, const char *in);  // ensures newline
+
+// Bit streaming
+inline void BsInit(BitStreamIn *pBits, const void *pBase, unsigned int byteSize);
+inline void BsInit(BitStreamOut *pBits, void *pBase, unsigned int byteSize);
+inline bool BsReadLsb(BitStreamIn *pBits, unsigned int *pOut, unsigned char numBits);
+inline bool BsReadMsb(BitStreamIn *pBits, unsigned int *pOut, unsigned char numBits);
+inline void BsReadFlush(BitStreamIn *pBits);  // Flush partial byte if there is one
+inline bool BsWriteLsb(BitStreamOut *pBits, unsigned int in, unsigned char numBits);
+inline bool BsWriteMsb(BitStreamOut *pBits, unsigned int in, unsigned char numBits);
+inline void BsWriteFlushLsb(BitStreamOut *pBits);  // Flush partial byte if there is one
+inline void BsWriteFlushMsb(BitStreamOut *pBits);  // Flush partial byte if there is one
+template <class BitStream> inline void BsSetPosLsb(BitStream *pBits, unsigned int bitPos);
+template <class BitStream> inline void BsSetPosMsb(BitStream *pBits, unsigned int bitPos);
+template <class BitStream> inline void BsSkipLsb(BitStream *pBits, int numBits);
+template <class BitStream> inline void BsSkipMsb(BitStream *pBits, int numBits);
+template <class BitStream> inline void BsUndoLsb(BitStream *pBits, unsigned int in, unsigned char numBits);
+template <class BitStream> inline void BsUndoMsb(BitStream *pBits, unsigned int in, unsigned char numBits);
+
+// Bit twiddling and byte swapping
+inline unsigned int BitSet(unsigned int bits, unsigned int mask);
+inline unsigned int BitReset(unsigned int bits, unsigned int mask);
+inline unsigned int BitFlip(unsigned int bits, unsigned int mask);
+inline unsigned int BitToggle(unsigned int bits, unsigned int mask, bool toggle);
+inline unsigned char BitReverse8(unsigned char value);
+inline unsigned short BitReverse16(unsigned short value);
+inline unsigned int BitReverse32(unsigned int value);
+inline int BitGetCount(unsigned int value);
+inline int BitGetMsb(unsigned int value);
+inline int BitGetLsb(unsigned int value);
+void BitInvertBuf(void *pData, unsigned int numBytes);
+void BitReverseBuf8(void *pData, unsigned int numBytes);
+inline void ByteSwap16(unsigned short &value);
+inline void ByteSwap32(unsigned int &value);
+inline void ByteSwap64(unsigned long long &value);
+void ByteSwapBuf16(void *pData, unsigned int count); // count in words, not bytes
+void ByteSwapBuf32(void *pData, unsigned int count); // count in double words, not bytes
+
+// File system manipulation
+bool FsCreateDir(const std::string &fullPathDir);
+bool FsDeleteDir(const std::string &fullPathDir);
+bool FsDeleteFile(const std::string &fullPathFile);
+bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew);
+bool FsSetWorkingDir(const std::string &fullPathDir);
+bool FsIsDir(const std::string &fullPath);
+bool FsIsFile(const std::string &fullPath);
+bool FsIsReadOnly(const std::string &fullPath);
+bool FsIsHidden(const std::string &fullPath);
+bool FsIsRelative(const std::string &path);
+time_t FsGetTimeAccess(const std::string &fullPath);
+time_t FsGetTimeMod(const std::string &fullPath);
+time_t FsGetTimeCreate(const std::string &fullPath);
+std::string FsGetTempDir(bool includeSlash);
+std::string FsGetWorkingDir(bool includeSlash);
+std::string FsGetAppDir(bool includeSlash);
+std::string FsGetAppPath();
+std::string FsGetFullPath(const std::string &path);
+std::string FsGetPathDir(const std::string &fullPath, bool includeSlash);
+std::string FsGetPathFile(const std::string &fullPath, bool includeExt);
+std::string FsGetPathExt(const std::string &fullPath, bool includeDot);
+unsigned long long FsGetFileSize(const std::string &fullPathFile);
 
 //-----------------------------------------------------------------------------------------------------------
 inline void IoClose(Io *io) {
@@ -271,16 +359,259 @@ inline void IoWriteRaw(const Io *io, size_t bytes, const void *pIn) {
 	io->funcWrite(io->handle, bytes, pIn);
 }
 
+//-------------------------------------------------------------------------------------------------------
+inline void BsInit(BitStreamIn *pBits, const void *pBase, unsigned int byteSize) {
+	pBits->pPos = pBits->pBase = reinterpret_cast<const unsigned char *>(pBase);
+	pBits->bytesLeft = byteSize;
+	pBits->hasBits = pBits->currBits = 0;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline void BsInit(BitStreamOut *pBits, void *pBase, unsigned int byteSize) {
+	pBits->pPos = pBits->pBase = reinterpret_cast<unsigned char *>(pBase);
+	pBits->bytesLeft = byteSize;
+	pBits->hasBits = pBits->currBits = 0;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline bool BsReadLsb(BitStreamIn *pBits, unsigned int *pOut, unsigned char numBits) {
+	while (pBits->hasBits < numBits) {
+		if (pBits->bytesLeft == 0)
+			return false;
+		pBits->currBits |= *pBits->pPos++ << pBits->hasBits;
+		pBits->bytesLeft--;
+		pBits->hasBits += 8;
+	}
+	*pOut = pBits->currBits & ((1 << numBits) - 1);
+	pBits->currBits >>= numBits;
+	pBits->hasBits -= numBits;
+	return true;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline bool BsReadMsb(BitStreamIn *pBits, unsigned int *pOut, unsigned char numBits) {
+	while (pBits->hasBits < numBits) {
+		if (pBits->bytesLeft == 0)
+			return false;
+		pBits->currBits |= *pBits->pPos++ << (24 - pBits->hasBits);
+		pBits->bytesLeft--;
+		pBits->hasBits += 8;
+	}
+	*pOut = pBits->currBits >> (32 - numBits);
+	pBits->currBits <<= numBits;
+	pBits->hasBits -= numBits;
+	return true;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline void BsReadFlush(BitStreamIn *pBits) {
+	if (pBits->hasBits) {
+		pBits->pPos++;
+		pBits->bytesLeft--;
+		pBits->currBits = 0;
+		pBits->hasBits = 0;
+	}
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline bool BsWriteLsb(BitStreamOut *pBits, unsigned int in, unsigned char numBits) {
+	pBits->currBits |= in << pBits->hasBits;
+	pBits->hasBits += numBits;
+	while (pBits->hasBits >= 8) {
+		*pBits->pPos++ = pBits->currBits & 0xff;
+		pBits->bytesLeft--;
+		pBits->currBits >>= 8;
+		pBits->hasBits -= 8;
+	}
+	return true;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline bool BsWriteMsb(BitStreamOut *pBits, unsigned int in, unsigned char numBits) {
+	pBits->currBits |= in << (32 - numBits - pBits->hasBits);
+	pBits->hasBits += numBits;
+	while (pBits->hasBits >= 8) {
+		*pBits->pPos++ = pBits->currBits >> 24;
+		pBits->bytesLeft--;
+		pBits->currBits <<= 8;
+		pBits->hasBits -= 8;
+	}
+	return true;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline void BsWriteFlushLsb(BitStreamOut *pBits) {
+	BsWriteLsb(pBits, 0, 0);
+	if (pBits->hasBits) {
+		unsigned char mask = (1 << pBits->hasBits) - 1;
+		*pBits->pPos = *pBits->pPos & ~mask;
+		*pBits->pPos++ |= pBits->currBits & mask;
+		pBits->bytesLeft--;
+		pBits->hasBits = 0;
+		pBits->currBits = 0;
+	}
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline void BsWriteFlushMsb(BitStreamOut *pBits) {
+	BsWriteMsb(pBits, 0, 0);
+	if (pBits->hasBits) {
+		unsigned char invmask = (1 << (8 - pBits->hasBits)) - 1;
+		*pBits->pPos = *pBits->pPos & invmask;
+		*pBits->pPos++ |= (pBits->currBits >> 24) & ~invmask;
+		pBits->bytesLeft--;
+		pBits->hasBits = 0;
+		pBits->currBits = 0;
+	}
+}
+
+//-----------------------------------------------------------------------------------------------------------
+template <class BitStream> inline void BsSetPosLsb(BitStream *pBits, unsigned int bitPos) {
+	pBits->bytesLeft = pBits->bytesLeft + (pBits->pPos - pBits->pBase) - ((bitPos + 7) >> 3);
+	pBits->pPos = pBits->pBase + (bitPos >> 3);
+	pBits->hasBits = (8 - (bitPos & 7)) & 7;
+	pBits->currBits = 0;
+	if (pBits->hasBits)
+		pBits->currBits = *pBits->pPos++ >> (bitPos & 7);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+template <class BitStream> inline void BsSetPosMsb(BitStream *pBits, unsigned int bitPos) {
+	pBits->bytesLeft = pBits->bytesLeft + (pBits->pPos - pBits->pBase) - ((bitPos + 7) >> 3);
+	pBits->pPos = pBits->pBase + (bitPos >> 3);
+	pBits->hasBits = (8 - (bitPos & 7)) & 7;
+	pBits->currBits = 0;
+	if (pBits->hasBits)
+		pBits->currBits = *pBits->pPos++ << (24 + (bitPos & 7));
+}
+
+//-----------------------------------------------------------------------------------------------------------
+template <class BitStream> inline void BsSkipLsb(BitStream *pBits, int numBits) {
+	int curr = static_cast<int>(((pBits->pPos - pBits->pBase) << 3) + pBits->hasBits);
+	BsSetPosLsb(pBits, static_cast<unsigned int>(curr + numBits));
+}
+
+//-----------------------------------------------------------------------------------------------------------
+template <class BitStream> inline void BsSkipMsb(BitStream *pBits, int numBits) {
+	int curr = static_cast<int>(((pBits->pPos - pBits->pBase) << 3) + pBits->hasBits);
+	BsSetPosMsb(pBits, static_cast<unsigned int>(curr + numBits));
+}
+
+//-----------------------------------------------------------------------------------------------------------
+template <class BitStream> inline void BsUndoLsb(BitStream *pBits, unsigned int in, unsigned char numBits) {
+	pBits->currBits <<= numBits;
+	pBits->currBits |= in & ((1 << numBits) - 1);
+	pBits->hasBits += numBits;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+template <class BitStream> inline void BsUndoMsb(BitStream *pBits, unsigned int in, unsigned char numBits) {
+	pBits->currBits >>= numBits;
+	pBits->currBits |= in << (32 - numBits);
+	pBits->hasBits += numBits;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+inline unsigned int BitSet(unsigned int bits, unsigned int mask) { return bits | mask; }
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned int BitReset(unsigned int bits, unsigned int mask) { return bits & ~mask; }
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned int BitFlip(unsigned int bits, unsigned int mask) { return bits ^ mask; }
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned int BitToggle(unsigned int bits, unsigned int mask, bool toggle) {
+	return toggle ? BitSet(bits, mask) : BitReset(bits, mask);
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned char BitReverse8(unsigned char value) {
+	return static_cast<unsigned char>(((value * 0x0802ul & 0x22110ul) | (value * 0x8020ul & 0x88440ul)) * 0x10101ul >> 16);
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned short BitReverse16(unsigned short value) {
+	value = ((value & 0xaaaa) >> 1) | ((value & 0x5555) << 1);
+	value = ((value & 0xcccc) >> 2) | ((value & 0x3333) << 2);
+	value = ((value & 0xf0f0) >> 4) | ((value & 0x0f0f) << 4);
+	return (value >> 8) | (value << 8);
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned int BitReverse32(unsigned int value) {
+	value = ((value & 0xaaaaaaaa) >> 1) | ((value & 0x55555555) << 1);
+	value = ((value & 0xcccccccc) >> 2) | ((value & 0x33333333) << 2);
+	value = ((value & 0xf0f0f0f0) >> 4) | ((value & 0x0f0f0f0f) << 4);
+	value = ((value & 0xff00ff00) >> 8) | ((value & 0x00ff00ff) << 8);
+	return (value >> 16) | (value << 16);
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline int BitGetCount(unsigned int value) {
+	value = value - ((value >> 1) & 0x55555555);
+	value = (value & 0x33333333) + ((value >> 2) & 0x33333333);
+	return ((value + (value >> 4) & 0xf0f0f0f0) * 0x01010101) >> 24;
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline int BitGetMsb(unsigned int value) {
+	static const int MultiplyDeBruijnBitPosition[32] = { 0, 9, 1, 10, 13, 21, 2, 29,
+		11, 14, 16, 18, 22, 25, 3, 30, 8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31 };
+	value |= value >> 1;
+	value |= value >> 2;
+	value |= value >> 4;
+	value |= value >> 8;
+	value |= value >> 16;
+	return MultiplyDeBruijnBitPosition[(value * 0x07c4acddu) >> 27];
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline int BitGetLsb(unsigned int value) {
+	static const int MultiplyDeBruijnBitPosition[32] = { 0, 1, 28, 2, 29, 14, 24, 3,
+		30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9 };
+	return MultiplyDeBruijnBitPosition[((value & -static_cast<int>(value)) * 0x077cb531u) >> 27];
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline void ByteSwap16(unsigned short &value) { value = (value >> 8) | (value << 8); }
+
+//-------------------------------------------------------------------------------------------------------
+inline void ByteSwap32(unsigned int &value) {
+	value = ((value & 0xff00ff00) >> 8) | ((value & 0x00ff00ff) << 8);
+	value = (value >> 16) | (value << 16);
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline void ByteSwap64(unsigned long long &value) {
+	value = ((value & 0xff00ff00ff00ff00ull) >> 8) | ((value & 0x00ff00ff00ff00ffull) << 8);
+	value = ((value & 0xffff0000ffff0000ull) >> 16) | ((value & 0x0000ffff0000ffffull) << 16);
+	value = (value >> 32) | (value << 32);
+}
+
 }  // namespace
 
 #endif  // _SAW_IO_H_INCLUDED
 
+
+
 #ifdef SAW_IO_IMPLEMENTATION
 
-#include <memory.h>
+#include <sys/types.h>      // This has to preceed sys/stat.h
+#include <sys/stat.h>       // stat (or _wstat)
+#include <stdio.h>          // fopen and family
+#include <memory.h>         // memcpy
 #ifdef _WIN32
-// Needed for proper utf8 support in windows
-#	include <codecvt>
+#	include <windows.h>     // many windows-specific functions
+#	include <codecvt>       // utf8 <-> utf16
+#elif defined(__linux) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#	include <unistd.h>      // readlink(), amongst others
+#	include <ftw.h>         // recursive folder walk
+#	include <stdlib.h>
+#	include <libgen.h>
+#	include <dirent.h>
+#elif defined(__APPLE__)
+#	include <mach-o/dyld.h> // _NSGetExecutablePath
 #endif
 
 namespace saw {
@@ -680,6 +1011,362 @@ void IoWriteLine8(const Io *io, const char *in) {
 		IoWrite8(io, '\r'); 
 		IoWrite8(io, '\n');
 	}
+}
+
+//-----------------------------------------------------------------------------------------------------------
+void BitInvertBuf(void *pData, unsigned int numBytes) {
+	unsigned int *pData32 = reinterpret_cast<unsigned int *>(pData);
+	for (unsigned int i = numBytes >> 2; i--; pData32++)
+		*pData32 = ~(*pData32);
+	unsigned char *pData8 = reinterpret_cast<unsigned char *>(pData32);
+	for (unsigned int i = numBytes & 3; i--; pData8++)
+		*pData8 = ~(*pData8);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+void BitReverseBuf8(void *pData, unsigned int numBytes) {
+	unsigned int *pData32 = reinterpret_cast<unsigned int *>(pData);
+	for (unsigned int i = numBytes >> 2; i--; pData32++) {  // Reverse 4 bytes at a time in parallel
+		*pData32 = ((*pData32 & 0xaaaaaaaa) >> 1) | ((*pData32 & 0x55555555) << 1);
+		*pData32 = ((*pData32 & 0xcccccccc) >> 2) | ((*pData32 & 0x33333333) << 2);
+		*pData32 = ((*pData32 & 0xf0f0f0f0) >> 4) | ((*pData32 & 0x0f0f0f0f) << 4);
+	}
+	unsigned char *pData8 = reinterpret_cast<unsigned char *>(pData32);
+	for (unsigned int i = numBytes & 3; i--; pData8++)
+		*pData8 = static_cast<unsigned char>(((*pData8 * 0x0802ul & 0x22110ul) | (*pData8 * 0x8020ul & 0x88440ul)) * 0x10101ul >> 16);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+void ByteSwapBuf16(void *pData, unsigned int count) {
+	unsigned short *pData16 = reinterpret_cast<unsigned short *>(pData);
+	for (unsigned int i = 0; i < count; i++)
+		ByteSwap16(pData16[i]);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+void ByteSwapBuf32(void *pData, unsigned int count) {
+	unsigned int *pData32 = reinterpret_cast<unsigned int *>(pData);
+	for (unsigned int i = 0; i < count; i++)
+		ByteSwap32(pData32[i]);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+static const int FS_PATH_MAX_LEN = 2048;
+
+#ifdef _WIN32
+
+static std::wstring utf8to16(const std::string &utf8) {
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
+	std::wstring utf16 = utf16conv.from_bytes(utf8.data());
+	return std::move(utf16);
+}
+
+static std::string utf16to8(const std::wstring &utf16) {
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
+	std::string utf8 = utf16conv.to_bytes(utf16.data());
+	return std::move(utf8);
+}
+
+enum FsAccessType {
+	FS_ACCESS_EXISTS = 0,
+	FS_ACCESS_WRITEONLY = 2,
+	FS_ACCESS_READONLY = 4,
+	FS_ACCESS_READWRITE = 6
+};
+
+#endif
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsCreateDir(const std::string &fullPathDir) {
+#ifdef _WIN32
+	std::wstring utf16 = utf8to16(fullPathDir);
+	if (_waccess(utf16.c_str(), FS_ACCESS_EXISTS) == 0) {
+#else
+	struct stat data;
+	if (stat(fullPathDir.c_str(), &data) == 0) {
+#endif
+		size_t index = fullPathDir.find_last_of("/\\");
+		if (index == fullPathDir.length() - 1)
+			index = fullPathDir.find_last_of("/\\", index - 1);
+		if (index != std::string::npos && !FsCreateDir(std::move(fullPathDir.substr(0, index))))
+			return false;
+#ifdef _WIN32
+		if (_wmkdir(utf16.c_str()) != 0)
+			return false;
+#else
+		if (mkdir(fullPathDir.c_str(), S_IRWXU) != 0)
+			return false;
+#endif
+	}
+	return true;
+	}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsDeleteDir(const std::string &fullPathDir) {
+#ifdef _WIN32
+	std::wstring utf16 = utf8to16(fullPathDir);
+	_wsystem((L"if exist " + utf16 + L" rmdir /s /q " + utf16).c_str());
+	return true;
+	//return RemoveDirectoryW(utf8to16(fullPath).c_str()) != 0;
+#else
+	auto funcDel = [](const char *fullPath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) -> int {
+		int rv = remove(fullPath);
+		if (rv)
+			perror(fullPath);
+		return rv;
+	};
+	return nftw(fullPathDir.c_str(), funcDel, 64, FTW_DEPTH | FTW_PHYS);
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsDeleteFile(const std::string &fullPathFile) {
+#ifdef _WIN32
+	return DeleteFileW(utf8to16(fullPathFile).c_str()) != 0;
+#else
+	return remove(fullPathFile.c_str()) != -1;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew) {
+#ifdef _WIN32
+	return MoveFileW(utf8to16(fullPathOld).c_str(), utf8to16(fullPathNew).c_str()) != 0;
+#else
+	return rename(fullPathOld.c_str(), fullPathNew.c_str()) != -1;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsSetWorkingDir(const std::string &fullPathDir) {
+#ifdef _WIN32
+	return SetCurrentDirectoryW(utf8to16(fullPathDir).c_str()) != 0;
+#else
+	return chdir(fullPathDir.c_str()) != -1;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsIsDir(const std::string &fullPath) {
+#ifdef _WIN32
+	struct _stat data;
+	return _wstat(utf8to16(fullPath).c_str(), &data) == 0 && (data.st_mode & _S_IFDIR);
+#else
+	struct stat data;
+	return stat(fullPath.c_str(), &data) == 0 && (data.st_mode & __S_IFDIR);
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsIsFile(const std::string &fullPath) {
+#ifdef _WIN32
+	DWORD attrib = GetFileAttributesW(utf8to16(fullPath).c_str());
+	return attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY);
+#else
+	struct stat data;
+	return stat(fullPath.c_str(), &data) == 0 && (data.st_mode & __S_IFREG);
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsIsReadOnly(const std::string &fullPath) {
+#ifdef _WIN32
+	std::wstring utf16 = utf8to16(fullPath);
+	return _waccess(utf16.c_str(), FS_ACCESS_EXISTS) == 0 && _waccess(utf16.c_str(), FS_ACCESS_WRITEONLY) == -1;
+#else
+	struct stat data;
+	return stat(fullPath.c_str(), &data) == 0 && access(fullPath.c_str(), W_OK) == -1;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsIsHidden(const std::string &fullPath) {
+#ifdef _WIN32
+	DWORD attr = GetFileAttributesW(utf8to16(fullPath).c_str());
+	return !!(attr & FILE_ATTRIBUTE_HIDDEN);
+#else
+	// Linux hidden files simply begin with a .
+	// Need extension detection in case the file name is something like .abcdefg
+	std::string file = FsGetPathFile(fullPath, true);
+	return !file.empty() && file.at(0) == '.';
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsIsRelative(const std::string &path) {
+	const char *buf = path.c_str();
+	if (buf && buf[0] == '.') {
+		int n = buf[1] == '.' ? 2 : 1;
+		return buf[n] == '/' || buf[n] == '\\';
+	}
+	return false;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+time_t FsGetTimeAccess(const std::string &fullPath) {
+#ifdef _WIN32
+	struct __stat64 data;
+	_wstat64(utf8to16(fullPath).c_str(), &data);
+#else
+	struct stat data;
+	stat(fullPath.c_str(), &data);
+#endif
+	return data.st_atime;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+time_t FsGetTimeMod(const std::string &fullPath) {
+#ifdef _WIN32
+	struct __stat64 data;
+	_wstat64(utf8to16(fullPath).c_str(), &data);
+#else
+	struct stat data;
+	stat(fullPath.c_str(), &data);
+#endif
+	return data.st_mtime;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+time_t FsGetTimeCreate(const std::string &fullPath) {
+#ifdef _WIN32
+	struct __stat64 data;
+	_wstat64(utf8to16(fullPath).c_str(), &data);
+#else
+	struct stat data;
+	stat(fullPath.c_str(), &data);
+#endif
+	return data.st_ctime;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetTempDir(bool includeSlash) {
+#ifdef _WIN32
+	wchar_t path[FS_PATH_MAX_LEN];
+	GetTempPathW(FS_PATH_MAX_LEN, path);
+	return utf16to8(path) + (includeSlash ? "\\" : "");
+#else
+	const char *path = getenv("TMPDIR");
+	if (path == 0)
+		path = "/tmp";
+	return std::string(path) + (includeSlash ? "/" : "");
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetWorkingDir(bool includeSlash) {
+#ifdef _WIN32
+	wchar_t path[FS_PATH_MAX_LEN];
+	GetCurrentDirectoryW(FS_PATH_MAX_LEN, path);
+	return utf16to8(path) + (includeSlash ? "\\" : "");
+#else
+	char path[FS_PATH_MAX_LEN];
+	getcwd(path, FS_PATH_MAX_LEN);
+	return std::string(path) + (includeSlash ? "/" : "");
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetAppDir(bool includeSlash) {
+	return std::move(FsGetPathDir(FsGetAppPath(), includeSlash));
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetAppPath() {
+#ifdef _WIN32
+	wchar_t path[FS_PATH_MAX_LEN];
+	DWORD len = GetModuleFileNameW(NULL, path, FS_PATH_MAX_LEN);
+	if (len <= 0 || len == FS_PATH_MAX_LEN)
+		path[0] = 0;
+	return utf16to8(path);
+#elif defined(__linux) || defined(__NetBSD__) || defined(__OpenBSD__)
+	char path[FS_PATH_MAX_LEN];
+	char link[32];
+#	ifdef __linux
+	snprintf(link, sizeof(link), "/proc/%d/exe", getpid());
+#	else
+	snprintf(link, sizeof(link), "/proc/%d/file", getpid());
+#	endif
+	ssize_t len = readlink(link, path, FS_PATH_MAX_LEN);
+	if (len <= 0 || len == FS_PATH_MAX_LEN)
+		path[0] = 0;
+	path[len] = 0;  // readlink doesn't null terminate
+	return path;
+#elif defined(__FreeBSD__)
+	char path[FS_PATH_MAX_LEN];
+	int name[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+	size_t len = FS_PATH_MAX_LEN - 1;
+	if (sysctl(name, 4, path, &len, NULL, 0) != 0)
+		path[0] = 0;
+	return path;
+#elif defined(__APPLE__)
+	char path[FS_PATH_MAX_LEN];
+	uint32_t bufSize = FS_PATH_MAX_LEN;
+	if (_NSGetExecutablePath(path, &bufSize) != 0)
+		path[0] = 0;
+	return path;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetFullPath(const std::string &path) {
+#ifdef _WIN32
+	wchar_t out16[FS_PATH_MAX_LEN];
+	_wfullpath(out16, utf8to16(path).c_str(), FS_PATH_MAX_LEN - 1);
+	return utf16to8(out16);
+#else
+	char out[FS_PATH_MAX_LEN];
+	realpath(path.c_str(), out);
+	return std::move(std::string(out));
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetPathDir(const std::string &fullPath, bool includeSlash) {
+	std::string dir;
+	auto lastSlash = fullPath.find_last_of("/\\");
+	if (lastSlash != std::string::npos)
+		dir = fullPath.substr(0, lastSlash + (includeSlash ? 1 : 0));
+	return std::move(dir);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetPathFile(const std::string &fullPath, bool includeExt) {
+	std::string file;
+	auto lastDot = fullPath.find_last_of('.');
+	auto fileStart = fullPath.find_last_of("/\\");
+	if (lastDot != std::string::npos && fileStart != std::string::npos && lastDot < fileStart)
+		lastDot = std::string::npos;
+	if (fileStart != std::string::npos)
+		fileStart++;
+	else
+		fileStart = 0;
+	file = fullPath.substr(fileStart, (includeExt ? fullPath.length() : lastDot) - fileStart);
+	return std::move(file);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetPathExt(const std::string &fullPath, bool includeDot) {
+	std::string ext;
+	auto lastDot = fullPath.find_last_of('.');
+	auto lastSlash = fullPath.find_last_of("/\\");
+	if (lastDot != std::string::npos && (lastSlash == std::string::npos || lastDot > lastSlash)) {
+		if (!includeDot)
+			lastDot++;
+		ext = fullPath.substr(lastDot, fullPath.length() - lastDot);
+	}
+	return std::move(ext);
+}
+
+//-----------------------------------------------------------------------------------------------------------
+unsigned long long FsGetFileSize(const std::string &fullPathFile) {
+#ifdef _WIN32
+	struct _stat64 data;
+	_wstat64(utf8to16(fullPathFile).c_str(), &data);
+#else
+	struct stat64 data;
+	stat64(fullPathFile.c_str(), &data);
+#endif
+	return data.st_size;
 }
 
 }  // namespace
