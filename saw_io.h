@@ -23,6 +23,7 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.01 - 03/17/16 - Fixed treat C-string like std::string in linux IoOpenFile
 // - v1.00 - 03/12/16 - Initial release by Scott Williams
 
 //-----------------------------------------------------------------------------------------------------------
@@ -34,8 +35,7 @@
 #ifndef _SAW_IO_H_INCLUDED
 #define _SAW_IO_H_INCLUDED
 
-#include <stddef.h>
-#include <stdarg.h>
+#include <stdarg.h>  // va_list
 #include <string>
 #include <vector>
 
@@ -300,7 +300,7 @@ bool IoOpenFile(Io *io, const char *filename, IoAccessType access) {
 #else
 	switch (access) {
 	case IO_ACCESS_RW_NEW: io->handle = fopen(filename, "w+b"); break;
-	case IO_ACCESS_RW: io->handle = fopen(filename, "r+b"); if (!io->handle) io->handle = fopen(filename.c_str(), "w+b"); break;
+	case IO_ACCESS_RW: io->handle = fopen(filename, "r+b"); if (!io->handle) io->handle = fopen(filename, "w+b"); break;
 	case IO_ACCESS_R: io->handle = fopen(filename, "rb"); break;
 	default: return false;
 	}
