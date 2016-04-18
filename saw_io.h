@@ -1,7 +1,7 @@
-// saw_io.h - Io abstraction including file and memory implementations
+// saw_io.h - Cross platform file system manipulation
+//          - Io abstraction including file and memory implementations
 //          - Bit streaming
-//          - Bit twiddling and byte swapping
-//          - Cross platform file system manipulation
+//          - Bit twiddling and byte swapping          
 //
 // This is free and unencumbered software released into the public domain.
 // 
@@ -26,6 +26,10 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.04 - 04/16/16 - Added FsGetRelPath
+//                    - Added FsWatch
+//                    - Added FsWalk
+// - v1.03 - 03/30/16 - Fixed a slightly ambiguous placement of braces
 // - v1.02 - 03/17/16 - Merged with bit streaming, bit twiddling, byte swapping libraries
 //                    - Merged with file system manipulation library
 // - v1.01 - 03/17/16 - Fixed treat C-string like std::string in linux IoOpenFile
@@ -33,23 +37,45 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // Notes
+// - Many functions everyone everywhere has implemented in some way or another, collected into a
+//   single, cross-platform, easy-to-integrate library.
+// - C++ allows constructs which reduce code complexity. This could easily be a C-compatible library, 
+//   but would become a little more cumbersome to use in C++ contexts, esp. W.R.T. strings.  Would need
+//   strong justification to make it C.
+
+//-----------------------------------------------------------------------------------------------------------
+// Usage
+// - Define SAW_IO_IMPLEMENTATION before inclusion in one file for library implementation
+// - Define SAW_IO_NO_VECTOR to remove std::vector dependencies
+// - Functionality is in saw:: namespace
 
 //-----------------------------------------------------------------------------------------------------------
 // Todo
-// @@ (Fs) Better error reporting (besides true/false)
-// @@ (Fs) Hand-written code for Windows version of FsDeleteDir so we can handle errors
-// @@ (Fs) FsGetRelPath(fullPathFrom, fullPathTo)
-// @@ (Fs) FsEnum(fullPath)
-// @@ (Fs) FsWatch(fullPath)
 
 #ifndef _SAW_IO_H_INCLUDED
 #define _SAW_IO_H_INCLUDED
 
-#include <stdarg.h>  // va_list
 #include <string>
-#include <vector>
+#ifndef SAW_IO_NO_VECTOR
+#	include <vector>
+#endif
 
 namespace saw {
+
+// Returning false stops the file tree walk
+typedef bool(*FsWalkFunc)(const std::string &fullPath, bool isFile, void *user);
+
+enum FsWatchType {
+	FS_WATCH_NONE = 0,
+	FS_WATCH_REMOVED,
+	FS_WATCH_CHANGED,
+	FS_WATCH_CREATED,
+};
+
+enum FsWalkType {
+	FS_WALK_NORMAL,    // top-down traversal of file tree
+	FS_WALK_DEPTH,     // depth-first traversal of file tree
+};
 
 enum IoSeekType {
 	IO_SEEK_SET,
@@ -88,13 +114,42 @@ struct BitStreamOut {
 	unsigned int bytesLeft;
 };
 
-// Io implementations
+// Cross platform file system manipulation
+bool FsCreateDir(const std::string &fullPathDir);
+bool FsDeleteDir(const std::string &fullPathDir);
+bool FsDeleteFile(const std::string &fullPathFile);
+bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew);
+bool FsSetWorkingDir(const std::string &fullPathDir);
+bool FsIsDir(const std::string &fullPath);
+bool FsIsFile(const std::string &fullPath);
+bool FsIsReadOnly(const std::string &fullPath);
+bool FsIsHidden(const std::string &fullPath);
+bool FsIsRelative(const std::string &path);
+time_t FsGetTimeAccess(const std::string &fullPath);
+time_t FsGetTimeMod(const std::string &fullPath);
+time_t FsGetTimeCreate(const std::string &fullPath);
+std::string FsGetTempDir(bool includeSlash);
+std::string FsGetWorkingDir(bool includeSlash);
+std::string FsGetAppDir(bool includeSlash);
+std::string FsGetAppPath();
+std::string FsGetRelPath(const std::string &fullPathFrom, const std::string &fullPathTo);
+std::string FsGetFullPath(const std::string &path);
+std::string FsGetPathDir(const std::string &fullPath, bool includeSlash);
+std::string FsGetPathFile(const std::string &fullPath, bool includeExt);
+std::string FsGetPathExt(const std::string &fullPath, bool includeDot);
+unsigned long long FsGetFileSize(const std::string &fullPathFile);
+FsWatchType FsWatch(const std::string &fullPath, int *state); // init state to 0
+bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, void *user);
+
+// Io abstraction - implementations
 bool IoOpenFile(Io *io, const char *filename, IoAccessType access);
 bool IoOpenMem(Io *io, const void *pMem, size_t size);
+#ifndef SAW_IO_NO_VECTOR
 bool IoOpenVec(Io *io, std::vector<char> *pVec);
-inline void IoClose(const Io *io);
+#endif
+void IoClose(Io *io);
 
-// Io abstraction
+// Io abstraction - general
 inline bool IoSeek(const Io *io, IoSeekType type, long long offset);
 inline bool IoSkip(const Io *io, long long offset);
 inline long long IoSize(const Io *io);
@@ -109,9 +164,7 @@ inline float IoReadFbe(const Io *io);
 inline double IoReadDle(const Io *io);
 inline double IoReadDbe(const Io *io);
 inline bool IoReadRaw(const Io *io, size_t bytes, void *pOut);
-void IoReadSVle(const Io *io, const char *format, va_list v);
 void IoReadSle(const Io *io, const char *format, ...);
-void IoReadSVbe(const Io *io, const char *format, va_list v);
 void IoReadSbe(const Io *io, const char *format, ...);
 bool IoReadText8(const Io *io, char *buf, int bufSize);  // Stops at null, eof, or bufSize; bufSize must consider null terminator
 bool IoReadLine8(const Io *io, char *buf, int bufSize);  // Stops at null, eof, eol, or bufSize; bufSize must consider null terminator; does NOT include eol character(s) in output
@@ -127,9 +180,7 @@ inline void IoWriteFbe(const Io *io, float val);
 inline void IoWriteDle(const Io *io, double val);
 inline void IoWriteDbe(const Io *io, double val);
 inline void IoWriteRaw(const Io *io, size_t bytes, const void *pIn);
-void IoWriteSVle(const Io *io, const char *format, va_list v);
 void IoWriteSle(const Io *io, const char *format, ...);
-void IoWriteSVbe(const Io *io, const char *format, va_list v);
 void IoWriteSbe(const Io *io, const char *format, ...);
 void IoWriteText8(const Io *io, const char *in, bool includeNull);
 void IoWriteLine8(const Io *io, const char *in);  // ensures newline
@@ -169,43 +220,6 @@ inline void ByteSwap32(unsigned int &value);
 inline void ByteSwap64(unsigned long long &value);
 void ByteSwapBuf16(void *pData, unsigned int count); // count in words, not bytes
 void ByteSwapBuf32(void *pData, unsigned int count); // count in double words, not bytes
-
-// File system manipulation
-bool FsCreateDir(const std::string &fullPathDir);
-bool FsDeleteDir(const std::string &fullPathDir);
-bool FsDeleteFile(const std::string &fullPathFile);
-bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew);
-bool FsSetWorkingDir(const std::string &fullPathDir);
-bool FsIsDir(const std::string &fullPath);
-bool FsIsFile(const std::string &fullPath);
-bool FsIsReadOnly(const std::string &fullPath);
-bool FsIsHidden(const std::string &fullPath);
-bool FsIsRelative(const std::string &path);
-time_t FsGetTimeAccess(const std::string &fullPath);
-time_t FsGetTimeMod(const std::string &fullPath);
-time_t FsGetTimeCreate(const std::string &fullPath);
-std::string FsGetTempDir(bool includeSlash);
-std::string FsGetWorkingDir(bool includeSlash);
-std::string FsGetAppDir(bool includeSlash);
-std::string FsGetAppPath();
-std::string FsGetFullPath(const std::string &path);
-std::string FsGetPathDir(const std::string &fullPath, bool includeSlash);
-std::string FsGetPathFile(const std::string &fullPath, bool includeExt);
-std::string FsGetPathExt(const std::string &fullPath, bool includeDot);
-unsigned long long FsGetFileSize(const std::string &fullPathFile);
-
-//-----------------------------------------------------------------------------------------------------------
-inline void IoClose(Io *io) {
-	if (io && io->handle) {
-		io->funcClose(io->handle);
-		io->handle = 0;
-		io->funcRead = 0;
-		io->funcWrite = 0;
-		io->funcSeek = 0;
-		io->funcTell = 0;
-		io->funcClose = 0;
-	}
-}
 
 //-----------------------------------------------------------------------------------------------------------
 inline bool IoSeek(const Io *io, IoSeekType type, long long offset) {
@@ -597,10 +611,11 @@ inline void ByteSwap64(unsigned long long &value) {
 
 #ifdef SAW_IO_IMPLEMENTATION
 
-#include <sys/types.h>      // This has to preceed sys/stat.h
-#include <sys/stat.h>       // stat (or _wstat)
+#include <stdarg.h>         // va_list
 #include <stdio.h>          // fopen and family
 #include <memory.h>         // memcpy
+#include <sys/types.h>      // This has to precede sys/stat.h
+#include <sys/stat.h>       // stat (or _wstat)
 #ifdef _WIN32
 #	include <windows.h>     // many windows-specific functions
 #	include <codecvt>       // utf8 <-> utf16
@@ -737,6 +752,7 @@ bool IoOpenMem(Io *io, const void *pMem, size_t size) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
+#ifndef SAW_IO_NO_VECTOR
 bool IoOpenVec(Io *io, std::vector<char> *pVec) {
 	struct VecHandle {
 		std::vector<char> *pVec;
@@ -800,6 +816,20 @@ bool IoOpenVec(Io *io, std::vector<char> *pVec) {
 	};
 
 	return true;
+}
+#endif
+
+//-----------------------------------------------------------------------------------------------------------
+void IoClose(Io *io) {
+	if (io && io->handle) {
+		io->funcClose(io->handle);
+		io->handle = 0;
+		io->funcRead = 0;
+		io->funcWrite = 0;
+		io->funcSeek = 0;
+		io->funcTell = 0;
+		io->funcClose = 0;
+	}
 }
 
 //-----------------------------------------------------------------------------------------------------------
@@ -1057,22 +1087,13 @@ static const int FS_PATH_MAX_LEN = 2048;
 
 static std::wstring utf8to16(const std::string &utf8) {
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
-	std::wstring utf16 = utf16conv.from_bytes(utf8.data());
-	return std::move(utf16);
+	return std::move(utf16conv.from_bytes(utf8.data()));
 }
 
 static std::string utf16to8(const std::wstring &utf16) {
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
-	std::string utf8 = utf16conv.to_bytes(utf16.data());
-	return std::move(utf8);
+	return std::move(utf16conv.to_bytes(utf16.data()));
 }
-
-enum FsAccessType {
-	FS_ACCESS_EXISTS = 0,
-	FS_ACCESS_WRITEONLY = 2,
-	FS_ACCESS_READONLY = 4,
-	FS_ACCESS_READWRITE = 6
-};
 
 #endif
 
@@ -1080,11 +1101,13 @@ enum FsAccessType {
 bool FsCreateDir(const std::string &fullPathDir) {
 #ifdef _WIN32
 	std::wstring utf16 = utf8to16(fullPathDir);
-	if (_waccess(utf16.c_str(), FS_ACCESS_EXISTS) == 0) {
+	struct _stat data;
+	if (_wstat(utf16.c_str(), &data) != 0)
 #else
 	struct stat data;
-	if (stat(fullPathDir.c_str(), &data) == 0) {
+	if (stat(fullPathDir.c_str(), &data) != 0)
 #endif
+	{
 		size_t index = fullPathDir.find_last_of("/\\");
 		if (index == fullPathDir.length() - 1)
 			index = fullPathDir.find_last_of("/\\", index - 1);
@@ -1099,24 +1122,23 @@ bool FsCreateDir(const std::string &fullPathDir) {
 #endif
 	}
 	return true;
-	}
+}
 
 //-----------------------------------------------------------------------------------------------------------
 bool FsDeleteDir(const std::string &fullPathDir) {
 #ifdef _WIN32
-	std::wstring utf16 = utf8to16(fullPathDir);
-	_wsystem((L"if exist " + utf16 + L" rmdir /s /q " + utf16).c_str());
-	return true;
-	//return RemoveDirectoryW(utf8to16(fullPath).c_str()) != 0;
-#else
-	auto funcDel = [](const char *fullPath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) -> int {
-		int rv = remove(fullPath);
-		if (rv)
-			perror(fullPath);
-		return rv;
+	auto funcDel = [](const std::string &fullPath, bool isFile, void * /*user*/) -> bool {
+		std::wstring utf16 = std::move(utf8to16(fullPath));
+		if (isFile)
+			return DeleteFileW(utf16.c_str()) != 0;
+		return RemoveDirectoryW(utf16.c_str()) != 0;
 	};
-	return nftw(fullPathDir.c_str(), funcDel, 64, FTW_DEPTH | FTW_PHYS);
+#else
+	auto funcDel = [](const std::string &fullPath, bool /*isFile*/, void * /*user*/) -> bool {
+		return remove(fullPath.c_str()) == 0;
+	};
 #endif
+	return FsWalk(fullPathDir, FS_WALK_DEPTH, funcDel, 0);
 }
 
 //-----------------------------------------------------------------------------------------------------------
@@ -1124,7 +1146,7 @@ bool FsDeleteFile(const std::string &fullPathFile) {
 #ifdef _WIN32
 	return DeleteFileW(utf8to16(fullPathFile).c_str()) != 0;
 #else
-	return remove(fullPathFile.c_str()) != -1;
+	return unlink(fullPathFile.c_str()) == 0;
 #endif
 }
 
@@ -1171,8 +1193,8 @@ bool FsIsFile(const std::string &fullPath) {
 //-----------------------------------------------------------------------------------------------------------
 bool FsIsReadOnly(const std::string &fullPath) {
 #ifdef _WIN32
-	std::wstring utf16 = utf8to16(fullPath);
-	return _waccess(utf16.c_str(), FS_ACCESS_EXISTS) == 0 && _waccess(utf16.c_str(), FS_ACCESS_WRITEONLY) == -1;
+	DWORD attr = GetFileAttributesW(utf8to16(fullPath).c_str());
+	return !!(attr & FILE_ATTRIBUTE_READONLY);
 #else
 	struct stat data;
 	return stat(fullPath.c_str(), &data) == 0 && access(fullPath.c_str(), W_OK) == -1;
@@ -1243,12 +1265,12 @@ std::string FsGetTempDir(bool includeSlash) {
 #ifdef _WIN32
 	wchar_t path[FS_PATH_MAX_LEN];
 	GetTempPathW(FS_PATH_MAX_LEN, path);
-	return utf16to8(path) + (includeSlash ? "\\" : "");
+	return std::move(utf16to8(path) + (includeSlash ? "\\" : ""));
 #else
 	const char *path = getenv("TMPDIR");
 	if (path == 0)
 		path = "/tmp";
-	return std::string(path) + (includeSlash ? "/" : "");
+	return std::move(std::string(path) + (includeSlash ? "/" : ""));
 #endif
 }
 
@@ -1257,11 +1279,11 @@ std::string FsGetWorkingDir(bool includeSlash) {
 #ifdef _WIN32
 	wchar_t path[FS_PATH_MAX_LEN];
 	GetCurrentDirectoryW(FS_PATH_MAX_LEN, path);
-	return utf16to8(path) + (includeSlash ? "\\" : "");
+	return std::move(utf16to8(path) + (includeSlash ? "\\" : ""));
 #else
 	char path[FS_PATH_MAX_LEN];
 	getcwd(path, FS_PATH_MAX_LEN);
-	return std::string(path) + (includeSlash ? "/" : "");
+	return std::move(std::string(path) + (includeSlash ? "/" : ""));
 #endif
 }
 
@@ -1277,7 +1299,7 @@ std::string FsGetAppPath() {
 	DWORD len = GetModuleFileNameW(NULL, path, FS_PATH_MAX_LEN);
 	if (len <= 0 || len == FS_PATH_MAX_LEN)
 		path[0] = 0;
-	return utf16to8(path);
+	return std::move(utf16to8(path));
 #elif defined(__linux) || defined(__NetBSD__) || defined(__OpenBSD__)
 	char path[FS_PATH_MAX_LEN];
 	char link[32];
@@ -1308,11 +1330,91 @@ std::string FsGetAppPath() {
 }
 
 //-----------------------------------------------------------------------------------------------------------
+std::string FsGetRelPath(const std::string &fullPathFrom, const std::string &fullPathTo) {
+	const char *bufFrom = fullPathFrom.c_str();
+	const char *bufTo = fullPathTo.c_str();
+	size_t lenFrom = fullPathFrom.size();
+	size_t lenTo = fullPathTo.size();
+
+#ifdef _WIN32
+	// No relative path if the drives are different
+	if (!lenFrom || !lenTo || tolower(bufFrom[0]) != tolower(bufTo[0]))
+		return std::string();
+	const char *dot = ".\\";
+	const char *dotdot = "..\\";
+	const char *delim = "\\";
+#else
+	if (!lenFrom || !lenTo)
+		return std::string();
+	const char *dot = "./";
+	const char *dotdot = "../";
+	const char *delim = "/";
+#endif
+	size_t posMatch = 0;
+	size_t posFrom = 0;
+	while (posFrom != lenFrom) {
+		posFrom = fullPathFrom.find_first_of("\\/", posMatch);
+		if (posFrom == std::string::npos)
+			posFrom = lenFrom;
+
+		if (posFrom > lenTo)
+			break;
+
+#ifdef _WIN32
+		// Windows is case insensitive
+		if (_strnicmp(bufFrom + posMatch, bufTo + posMatch, posFrom - posMatch) != 0)
+			break;
+#else
+		// Non-windows is case sensitive
+		if (strncmp(bufFrom + posMatch, bufTo + posMatch, posFrom - posMatch) != 0)
+			break;
+#endif
+
+		posMatch = fullPathFrom.find_first_not_of("\\/", posFrom);
+		if (posMatch == std::string::npos)
+			posMatch = lenFrom;
+	}
+
+	std::string output;
+	output.reserve(FS_PATH_MAX_LEN);
+	if (posFrom == lenFrom) {
+		output.assign(dot);
+	}
+	else {
+		output.append(dotdot);
+		while (posFrom != std::string::npos) {
+			posFrom = fullPathFrom.find_first_not_of("\\/", posFrom);
+			if (posFrom != std::string::npos) {
+				posFrom = fullPathFrom.find_first_of("\\/", posFrom);
+				output.append(dotdot);
+			}
+		}
+	}
+
+	posMatch = fullPathTo.find_first_not_of("\\/", posMatch);
+	while (posMatch != std::string::npos) {
+		size_t posTo = fullPathTo.find_first_of("\\/", posMatch);
+		if (posTo == std::string::npos)
+			posTo = lenTo;
+		
+		output.append(bufTo + posMatch, bufTo + posTo);
+
+		posMatch = fullPathTo.find_first_not_of("\\/", posTo);
+		if (posMatch == std::string::npos) {
+			if (posTo != lenTo)
+				output.append(delim);
+		}
+	};
+
+	return std::move(output);
+}
+
+//-----------------------------------------------------------------------------------------------------------
 std::string FsGetFullPath(const std::string &path) {
 #ifdef _WIN32
 	wchar_t out16[FS_PATH_MAX_LEN];
 	_wfullpath(out16, utf8to16(path).c_str(), FS_PATH_MAX_LEN - 1);
-	return utf16to8(out16);
+	return std::move(utf16to8(out16));
 #else
 	char out[FS_PATH_MAX_LEN];
 	realpath(path.c_str(), out);
@@ -1367,6 +1469,94 @@ unsigned long long FsGetFileSize(const std::string &fullPathFile) {
 	stat64(fullPathFile.c_str(), &data);
 #endif
 	return data.st_size;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+FsWatchType FsWatch(const std::string &fullPath, int *state) {
+	time_t timeMod = FsGetTimeMod(fullPath);
+	std::wstring utf16 = utf8to16(fullPath);
+	struct _stat data;
+	bool exists = _wstat(utf16.c_str(), &data) == 0;
+
+	int hash = static_cast<int>(((timeMod >> 48) ^ (timeMod >> 32) ^ (timeMod >> 16) ^ timeMod) << 16);
+	if (exists)
+		hash |= 0x00008000;
+	int oldState = *state;
+
+	if (oldState != hash) {
+		*state = hash;
+		if (oldState) {
+			bool oldExists = !!(oldState & 0x00008000);
+			if (oldExists != exists)
+				return exists ? FS_WATCH_CREATED : FS_WATCH_REMOVED;
+			return FS_WATCH_CHANGED;
+		}
+	}
+	return FS_WATCH_NONE;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+#ifndef _WIN32
+static FsWalkFunc gFsWalkCallback;
+static void *gFsWalkUser;
+#endif
+
+bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, void *user) {
+#ifdef _WIN32
+	if (type == FS_WALK_NORMAL) {
+		if (!callback(fullPath, false, user))
+			return false;
+	}
+
+	WIN32_FIND_DATAW fd;
+	std::wstring fullPath16 = std::move(utf8to16(fullPath));
+
+	HANDLE hEnum = FindFirstFileExW((fullPath16 + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, 0, 0);
+	if (hEnum == INVALID_HANDLE_VALUE)
+		return false;
+
+	while (1) {
+		if (fd.cFileName[0] != L'.' || (fd.cFileName[1] != 0 && (fd.cFileName[1] != L'.' || fd.cFileName[2] != 0))) {
+			bool isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+			
+			std::string nextPath = std::move(utf16to8(fullPath16 + L'\\' + fd.cFileName));
+			if (isDir) {
+				if (!FsWalk(nextPath, type, callback, user)) {
+					FindClose(hEnum);
+					return false;
+				}
+			}
+			else if (!callback(nextPath, true, user)) {
+				FindClose(hEnum);
+				return false;
+			}
+		}
+		if (FindNextFileW(hEnum, &fd) == FALSE) {
+			if (GetLastError() != ERROR_NO_MORE_FILES) {
+				FindClose(hEnum);
+				return false;
+			}
+			break;
+		}
+	}
+
+	FindClose(hEnum);
+
+	if (type == FS_WALK_DEPTH)
+		return callback(fullPath, false, user);
+
+	return true;
+#else
+	gFsWalkCallback = callback;
+	gFsWalkUser = user;
+	auto funcFtw = [](const char *fullPath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) -> int {
+		if (!gFsWalkCallback(fullPath, typeflag == FTW_F, gFsWalkUser))
+			return -1;
+		return 0;
+	};
+	int flags = FTW_PHYS | (type == FS_WALK_DEPTH ? FTW_DEPTH : 0);
+	return nftw(fullPathDir.c_str(), funcFtw, 64, flags);
+#endif
 }
 
 }  // namespace
