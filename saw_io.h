@@ -26,6 +26,11 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.06 - 04/28/16 - Committed to C++ style strings and expectations
+//                    - Bit/Byte functions more consistent
+//                    - Reduced dependencies
+// - v1.05 - 04/20/16 - Fixed FsWatch on 32-bit platforms
+//                    - Fixed FsWalk in linux
 // - v1.04 - 04/16/16 - Added FsGetRelPath
 //                    - Added FsWatch
 //                    - Added FsWalk
@@ -37,11 +42,7 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // Notes
-// - Many functions everyone everywhere has implemented in some way or another, collected into a
-//   single, cross-platform, easy-to-integrate library.
-// - C++ allows constructs which reduce code complexity. This could easily be a C-compatible library, 
-//   but would become a little more cumbersome to use in C++ contexts, esp. W.R.T. strings.  Would need
-//   strong justification to make it C.
+// - Simple, tested C++ solution for most filesystem i/o needs
 
 //-----------------------------------------------------------------------------------------------------------
 // Usage
@@ -142,7 +143,7 @@ FsWatchType FsWatch(const std::string &fullPath, int *state); // init state to 0
 bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, void *user);
 
 // Io abstraction - implementations
-bool IoOpenFile(Io *io, const char *filename, IoAccessType access);
+bool IoOpenFile(Io *io, const std::string &filename, IoAccessType access);
 bool IoOpenMem(Io *io, const void *pMem, size_t size);
 #ifndef SAW_IO_NO_VECTOR
 bool IoOpenVec(Io *io, std::vector<char> *pVec);
@@ -164,8 +165,6 @@ inline float IoReadFbe(const Io *io);
 inline double IoReadDle(const Io *io);
 inline double IoReadDbe(const Io *io);
 inline bool IoReadRaw(const Io *io, size_t bytes, void *pOut);
-void IoReadSle(const Io *io, const char *format, ...);
-void IoReadSbe(const Io *io, const char *format, ...);
 bool IoReadText8(const Io *io, char *buf, int bufSize);  // Stops at null, eof, or bufSize; bufSize must consider null terminator
 bool IoReadLine8(const Io *io, char *buf, int bufSize);  // Stops at null, eof, eol, or bufSize; bufSize must consider null terminator; does NOT include eol character(s) in output
 bool IoReadText8(const Io *io, std::string *pOut, int len);  // Stops at null, eof, or len if >= 0 for more secure reads
@@ -203,23 +202,19 @@ template <class BitStream> inline void BsUndoLsb(BitStream *pBits, unsigned int 
 template <class BitStream> inline void BsUndoMsb(BitStream *pBits, unsigned int in, unsigned char numBits);
 
 // Bit twiddling and byte swapping
-inline unsigned int BitSet(unsigned int bits, unsigned int mask);
-inline unsigned int BitReset(unsigned int bits, unsigned int mask);
-inline unsigned int BitFlip(unsigned int bits, unsigned int mask);
-inline unsigned int BitToggle(unsigned int bits, unsigned int mask, bool toggle);
 inline unsigned char BitReverse8(unsigned char value);
 inline unsigned short BitReverse16(unsigned short value);
 inline unsigned int BitReverse32(unsigned int value);
 inline int BitGetCount(unsigned int value);
 inline int BitGetMsb(unsigned int value);
 inline int BitGetLsb(unsigned int value);
-void BitInvertBuf(void *pData, unsigned int numBytes);
-void BitReverseBuf8(void *pData, unsigned int numBytes);
-inline void ByteSwap16(unsigned short &value);
-inline void ByteSwap32(unsigned int &value);
-inline void ByteSwap64(unsigned long long &value);
-void ByteSwapBuf16(void *pData, unsigned int count); // count in words, not bytes
-void ByteSwapBuf32(void *pData, unsigned int count); // count in double words, not bytes
+void BitInvertBuf(void *pData, size_t numBytes);
+void BitReverseBuf8(void *pData, size_t numBytes);
+inline unsigned short ByteSwap16(unsigned short value);
+inline unsigned int ByteSwap32(unsigned int value);
+inline unsigned long long ByteSwap64(unsigned long long value);
+void ByteSwapBuf16(void *pData, size_t count); // count in words, not bytes
+void ByteSwapBuf32(void *pData, size_t count); // count in double words, not bytes
 
 //-----------------------------------------------------------------------------------------------------------
 inline bool IoSeek(const Io *io, IoSeekType type, long long offset) {
@@ -525,23 +520,9 @@ template <class BitStream> inline void BsUndoMsb(BitStream *pBits, unsigned int 
 	pBits->hasBits += numBits;
 }
 
-//-----------------------------------------------------------------------------------------------------------
-inline unsigned int BitSet(unsigned int bits, unsigned int mask) { return bits | mask; }
-
-//-------------------------------------------------------------------------------------------------------
-inline unsigned int BitReset(unsigned int bits, unsigned int mask) { return bits & ~mask; }
-
-//-------------------------------------------------------------------------------------------------------
-inline unsigned int BitFlip(unsigned int bits, unsigned int mask) { return bits ^ mask; }
-
-//-------------------------------------------------------------------------------------------------------
-inline unsigned int BitToggle(unsigned int bits, unsigned int mask, bool toggle) {
-	return toggle ? BitSet(bits, mask) : BitReset(bits, mask);
-}
-
 //-------------------------------------------------------------------------------------------------------
 inline unsigned char BitReverse8(unsigned char value) {
-	return static_cast<unsigned char>(((value * 0x0802ul & 0x22110ul) | (value * 0x8020ul & 0x88440ul)) * 0x10101ul >> 16);
+	return static_cast<unsigned char>(((value * 0x0802u & 0x22110u) | (value * 0x8020u & 0x88440u)) * 0x10101u >> 16);
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -588,19 +569,24 @@ inline int BitGetLsb(unsigned int value) {
 }
 
 //-------------------------------------------------------------------------------------------------------
-inline void ByteSwap16(unsigned short &value) { value = (value >> 8) | (value << 8); }
-
-//-------------------------------------------------------------------------------------------------------
-inline void ByteSwap32(unsigned int &value) {
-	value = ((value & 0xff00ff00) >> 8) | ((value & 0x00ff00ff) << 8);
-	value = (value >> 16) | (value << 16);
+inline unsigned short ByteSwap16(unsigned short value) { 
+	value = (value >> 8) | (value << 8);
+	return value;
 }
 
 //-------------------------------------------------------------------------------------------------------
-inline void ByteSwap64(unsigned long long &value) {
+inline unsigned int ByteSwap32(unsigned int value) {
+	value = ((value & 0xff00ff00) >> 8) | ((value & 0x00ff00ff) << 8);
+	value = (value >> 16) | (value << 16);
+	return value;
+}
+
+//-------------------------------------------------------------------------------------------------------
+inline unsigned long long ByteSwap64(unsigned long long value) {
 	value = ((value & 0xff00ff00ff00ff00ull) >> 8) | ((value & 0x00ff00ff00ff00ffull) << 8);
 	value = ((value & 0xffff0000ffff0000ull) >> 16) | ((value & 0x0000ffff0000ffffull) << 16);
 	value = (value >> 32) | (value << 32);
+	return value;
 }
 
 }  // namespace
@@ -611,32 +597,52 @@ inline void ByteSwap64(unsigned long long &value) {
 
 #ifdef SAW_IO_IMPLEMENTATION
 
-#include <stdarg.h>         // va_list
-#include <stdio.h>          // fopen and family
-#include <memory.h>         // memcpy
-#include <sys/types.h>      // This has to precede sys/stat.h
-#include <sys/stat.h>       // stat (or _wstat)
+#include <stdarg.h>             // va_list
+#include <stdio.h>              // fopen and family
+#include <string.h>             // strncmp/_strnicmp
+#include <memory.h>             // memcpy
 #ifdef _WIN32
-#	include <windows.h>     // many windows-specific functions
-#	include <codecvt>       // utf8 <-> utf16
-#elif defined(__linux) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-#	include <unistd.h>      // readlink(), amongst others
-#	include <ftw.h>         // recursive folder walk
-#	include <stdlib.h>
-#	include <libgen.h>
-#	include <dirent.h>
-#elif defined(__APPLE__)
-#	include <mach-o/dyld.h> // _NSGetExecutablePath
+#	include <windows.h>         // many windows-specific functions
+#else
+#	ifdef __APPLE__
+#		include <mach-o/dyld.h> // _NSGetExecutablePath
+#	elif defined(__linux) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#		include <unistd.h>      // readlink, getcwd, chdir
+#	endif
+#	include <sys/types.h>       // This has to precede sys/stat.h
+#	include <sys/stat.h>        // stat
+#	include <ftw.h>             // recursive folder walk
+#	include <stdlib.h>          // getenv, realpath
 #endif
 
 namespace saw {
 
-bool IoOpenFile(Io *io, const char *filename, IoAccessType access) {
+static const int FS_PATH_MAX_LEN = 2048;
+
+#ifdef _WIN32
+static std::wstring utf8to16(const std::string &utf8) {
+	std::wstring utf16;
+	utf16.resize(FS_PATH_MAX_LEN);
+	int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), utf8.size(), &utf16[0], FS_PATH_MAX_LEN);
+	utf16.resize(size);
+	return std::move(utf16);
+}
+
+static std::string utf16to8(const std::wstring &utf16) {
+	std::string utf8;
+	utf8.resize(FS_PATH_MAX_LEN);
+	int size = WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), utf16.size(), &utf8[0], FS_PATH_MAX_LEN, 0, 0);
+	utf8.resize(size);
+	return std::move(utf8);
+}
+#endif
+
+//-----------------------------------------------------------------------------------------------------------
+bool IoOpenFile(Io *io, const std::string &filename, IoAccessType access) {
 	if (!io)
 		return false;
 #ifdef _WIN32
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
-	std::wstring utf16 = utf16conv.from_bytes(filename);
+	std::wstring utf16 = std::move(utf8to16(filename));
 	switch (access) {
 	case IO_ACCESS_RW_NEW: _wfopen_s(reinterpret_cast<FILE **>(&io->handle), utf16.c_str(), L"w+b"); break;
 	case IO_ACCESS_RW: _wfopen_s(reinterpret_cast<FILE **>(&io->handle), utf16.c_str(), L"r+b"); if (!io->handle) _wfopen_s(reinterpret_cast<FILE **>(&io->handle), utf16.c_str(), L"w+b"); break;
@@ -645,9 +651,9 @@ bool IoOpenFile(Io *io, const char *filename, IoAccessType access) {
 	}
 #else
 	switch (access) {
-	case IO_ACCESS_RW_NEW: io->handle = fopen(filename, "w+b"); break;
-	case IO_ACCESS_RW: io->handle = fopen(filename, "r+b"); if (!io->handle) io->handle = fopen(filename, "w+b"); break;
-	case IO_ACCESS_R: io->handle = fopen(filename, "rb"); break;
+	case IO_ACCESS_RW_NEW: io->handle = fopen(filename.c_str(), "w+b"); break;
+	case IO_ACCESS_RW: io->handle = fopen(filename.c_str(), "r+b"); if (!io->handle) io->handle = fopen(filename.c_str(), "w+b"); break;
+	case IO_ACCESS_R: io->handle = fopen(filename.c_str(), "rb"); break;
 	default: return false;
 	}
 #endif
@@ -833,52 +839,6 @@ void IoClose(Io *io) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
-void IoReadSVle(const Io *io, const char *format, va_list v) {
-	while (*format) {
-		switch (*format++) {
-			case ' ': break;
-			case '1': { int *x = va_arg(v, int *); *x = IoRead8(io); break; }
-			case '2': { int *x = va_arg(v, int *); *x = IoRead16le(io); break; }
-			case '4': { int *x = va_arg(v, int *); *x = IoRead32le(io); break; }
-			case 'f': case 'F': { float *x = va_arg(v, float *); *x = IoReadFle(io); break; }
-			case 'd': case 'D': { double *x = va_arg(v, double *); *x = IoReadDle(io); break; }
-			default: va_end(v); return;
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------------------------------------
-void IoReadSle(const Io *io, const char *format, ...) {
-   va_list v;
-   va_start(v, format);
-   IoReadSVle(io, format, v);
-   va_end(v);
-}
-
-//-----------------------------------------------------------------------------------------------------------
-void IoReadSVbe(const Io *io, const char *format, va_list v) {
-	while (*format) {
-		switch (*format++) {
-			case ' ': break;
-			case '1': { int *x = va_arg(v, int *); *x = IoRead8(io); break; }
-			case '2': { int *x = va_arg(v, int *); *x = IoRead16be(io); break; }
-			case '4': { int *x = va_arg(v, int *); *x = IoRead32be(io); break; }
-			case 'f': case 'F': { float *x = va_arg(v, float *); *x = IoReadFbe(io); break; }
-			case 'd': case 'D': { double *x = va_arg(v, double *); *x = IoReadDbe(io); break; }
-			default: va_end(v); return;
-		}
-	}
-}
-
-//-----------------------------------------------------------------------------------------------------------
-void IoReadSbe(const Io *io, const char *format, ...) {
-   va_list v;
-   va_start(v, format);
-   IoReadSVbe(io, format, v);
-   va_end(v);
-}
-
-//-----------------------------------------------------------------------------------------------------------
 bool IoReadText8(const Io *io, char *buf, int bufSize) {
 	if (bufSize <= 0)
 		return false;
@@ -1044,65 +1004,50 @@ void IoWriteLine8(const Io *io, const char *in) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
-void BitInvertBuf(void *pData, unsigned int numBytes) {
+void BitInvertBuf(void *pData, size_t numBytes) {
 	unsigned int *pData32 = reinterpret_cast<unsigned int *>(pData);
-	for (unsigned int i = numBytes >> 2; i--; pData32++)
+	for (size_t i = numBytes >> 2; i--; pData32++)
 		*pData32 = ~(*pData32);
 	unsigned char *pData8 = reinterpret_cast<unsigned char *>(pData32);
-	for (unsigned int i = numBytes & 3; i--; pData8++)
+	for (size_t i = numBytes & 3; i--; pData8++)
 		*pData8 = ~(*pData8);
 }
 
 //-----------------------------------------------------------------------------------------------------------
-void BitReverseBuf8(void *pData, unsigned int numBytes) {
+void BitReverseBuf8(void *pData, size_t numBytes) {
 	unsigned int *pData32 = reinterpret_cast<unsigned int *>(pData);
-	for (unsigned int i = numBytes >> 2; i--; pData32++) {  // Reverse 4 bytes at a time in parallel
+	for (size_t i = numBytes >> 2; i--; pData32++) {  // Reverse 4 bytes at a time in parallel
 		*pData32 = ((*pData32 & 0xaaaaaaaa) >> 1) | ((*pData32 & 0x55555555) << 1);
 		*pData32 = ((*pData32 & 0xcccccccc) >> 2) | ((*pData32 & 0x33333333) << 2);
 		*pData32 = ((*pData32 & 0xf0f0f0f0) >> 4) | ((*pData32 & 0x0f0f0f0f) << 4);
 	}
 	unsigned char *pData8 = reinterpret_cast<unsigned char *>(pData32);
-	for (unsigned int i = numBytes & 3; i--; pData8++)
-		*pData8 = static_cast<unsigned char>(((*pData8 * 0x0802ul & 0x22110ul) | (*pData8 * 0x8020ul & 0x88440ul)) * 0x10101ul >> 16);
+	for (size_t i = numBytes & 3; i--; pData8++)
+		*pData8 = BitReverse8(*pData8);
 }
 
 //-----------------------------------------------------------------------------------------------------------
-void ByteSwapBuf16(void *pData, unsigned int count) {
+void ByteSwapBuf16(void *pData, size_t count) {
 	unsigned short *pData16 = reinterpret_cast<unsigned short *>(pData);
-	for (unsigned int i = 0; i < count; i++)
+	for (size_t i = 0; i < count; i++)
 		ByteSwap16(pData16[i]);
 }
 
 //-----------------------------------------------------------------------------------------------------------
-void ByteSwapBuf32(void *pData, unsigned int count) {
+void ByteSwapBuf32(void *pData, size_t count) {
 	unsigned int *pData32 = reinterpret_cast<unsigned int *>(pData);
-	for (unsigned int i = 0; i < count; i++)
+	for (size_t i = 0; i < count; i++)
 		ByteSwap32(pData32[i]);
 }
 
 //-----------------------------------------------------------------------------------------------------------
-static const int FS_PATH_MAX_LEN = 2048;
-
-#ifdef _WIN32
-
-static std::wstring utf8to16(const std::string &utf8) {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
-	return std::move(utf16conv.from_bytes(utf8.data()));
-}
-
-static std::string utf16to8(const std::wstring &utf16) {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> utf16conv;
-	return std::move(utf16conv.to_bytes(utf16.data()));
-}
-
-#endif
-
-//-----------------------------------------------------------------------------------------------------------
 bool FsCreateDir(const std::string &fullPathDir) {
 #ifdef _WIN32
+	// http://mfctips.com/2012/03/26/best-way-to-check-if-file-or-directory-exists/
 	std::wstring utf16 = utf8to16(fullPathDir);
-	struct _stat data;
-	if (_wstat(utf16.c_str(), &data) != 0)
+	DWORD attrib = GetFileAttributesW(utf16.c_str());
+	DWORD err = GetLastError();
+	if (attrib == INVALID_FILE_ATTRIBUTES && (err == ERROR_PATH_NOT_FOUND || err == ERROR_FILE_NOT_FOUND))
 #else
 	struct stat data;
 	if (stat(fullPathDir.c_str(), &data) != 0)
@@ -1114,7 +1059,7 @@ bool FsCreateDir(const std::string &fullPathDir) {
 		if (index != std::string::npos && !FsCreateDir(std::move(fullPathDir.substr(0, index))))
 			return false;
 #ifdef _WIN32
-		if (_wmkdir(utf16.c_str()) != 0)
+		if (!CreateDirectoryW(utf16.c_str(), NULL))
 			return false;
 #else
 		if (mkdir(fullPathDir.c_str(), S_IRWXU) != 0)
@@ -1134,8 +1079,10 @@ bool FsDeleteDir(const std::string &fullPathDir) {
 		return RemoveDirectoryW(utf16.c_str()) != 0;
 	};
 #else
-	auto funcDel = [](const std::string &fullPath, bool /*isFile*/, void * /*user*/) -> bool {
-		return remove(fullPath.c_str()) == 0;
+	auto funcDel = [](const std::string &fullPath, bool isFile, void * /*user*/) -> bool {
+		if (isFile)
+			return unlink(fullPath.c_str()) == 0;
+		return rmdir(utf16.c_str()) == 0;
 	};
 #endif
 	return FsWalk(fullPathDir, FS_WALK_DEPTH, funcDel, 0);
@@ -1171,8 +1118,8 @@ bool FsSetWorkingDir(const std::string &fullPathDir) {
 //-----------------------------------------------------------------------------------------------------------
 bool FsIsDir(const std::string &fullPath) {
 #ifdef _WIN32
-	struct _stat data;
-	return _wstat(utf8to16(fullPath).c_str(), &data) == 0 && (data.st_mode & _S_IFDIR);
+	DWORD attrib = GetFileAttributesW(utf8to16(fullPath).c_str());
+	return attrib != INVALID_FILE_ATTRIBUTES && (attrib & FILE_ATTRIBUTE_DIRECTORY);
 #else
 	struct stat data;
 	return stat(fullPath.c_str(), &data) == 0 && (data.st_mode & __S_IFDIR);
@@ -1193,8 +1140,8 @@ bool FsIsFile(const std::string &fullPath) {
 //-----------------------------------------------------------------------------------------------------------
 bool FsIsReadOnly(const std::string &fullPath) {
 #ifdef _WIN32
-	DWORD attr = GetFileAttributesW(utf8to16(fullPath).c_str());
-	return !!(attr & FILE_ATTRIBUTE_READONLY);
+	DWORD attrib = GetFileAttributesW(utf8to16(fullPath).c_str());
+	return attrib != INVALID_FILE_ATTRIBUTES && (attrib & FILE_ATTRIBUTE_READONLY);
 #else
 	struct stat data;
 	return stat(fullPath.c_str(), &data) == 0 && access(fullPath.c_str(), W_OK) == -1;
@@ -1204,8 +1151,8 @@ bool FsIsReadOnly(const std::string &fullPath) {
 //-----------------------------------------------------------------------------------------------------------
 bool FsIsHidden(const std::string &fullPath) {
 #ifdef _WIN32
-	DWORD attr = GetFileAttributesW(utf8to16(fullPath).c_str());
-	return !!(attr & FILE_ATTRIBUTE_HIDDEN);
+	DWORD attrib = GetFileAttributesW(utf8to16(fullPath).c_str());
+	return attrib != INVALID_FILE_ATTRIBUTES && (attrib & FILE_ATTRIBUTE_HIDDEN);
 #else
 	// Linux hidden files simply begin with a .
 	// Need extension detection in case the file name is something like .abcdefg
@@ -1227,37 +1174,46 @@ bool FsIsRelative(const std::string &path) {
 //-----------------------------------------------------------------------------------------------------------
 time_t FsGetTimeAccess(const std::string &fullPath) {
 #ifdef _WIN32
-	struct __stat64 data;
-	_wstat64(utf8to16(fullPath).c_str(), &data);
+	WIN32_FILE_ATTRIBUTE_DATA data;
+	if (!GetFileAttributesExW(utf8to16(fullPath).c_str(), GetFileExInfoStandard, &data))
+		return 0;
+	unsigned long long hns1601 = (static_cast<unsigned long long>(data.ftLastAccessTime.dwHighDateTime) << 32) | data.ftLastAccessTime.dwLowDateTime;
+	return static_cast<time_t>(hns1601 / 10000000ULL - 11644473600ULL);
 #else
 	struct stat data;
 	stat(fullPath.c_str(), &data);
-#endif
 	return data.st_atime;
+#endif
 }
 
 //-----------------------------------------------------------------------------------------------------------
 time_t FsGetTimeMod(const std::string &fullPath) {
 #ifdef _WIN32
-	struct __stat64 data;
-	_wstat64(utf8to16(fullPath).c_str(), &data);
+	WIN32_FILE_ATTRIBUTE_DATA data;
+	if (!GetFileAttributesExW(utf8to16(fullPath).c_str(), GetFileExInfoStandard, &data))
+		return 0;
+	unsigned long long hns1601 = (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
+	return static_cast<time_t>(hns1601 / 10000000ULL - 11644473600ULL);
 #else
 	struct stat data;
 	stat(fullPath.c_str(), &data);
-#endif
 	return data.st_mtime;
+#endif
 }
 
 //-----------------------------------------------------------------------------------------------------------
 time_t FsGetTimeCreate(const std::string &fullPath) {
 #ifdef _WIN32
-	struct __stat64 data;
-	_wstat64(utf8to16(fullPath).c_str(), &data);
+	WIN32_FILE_ATTRIBUTE_DATA data;
+	if (!GetFileAttributesExW(utf8to16(fullPath).c_str(), GetFileExInfoStandard, &data))
+		return 0;
+	unsigned long long hns1601 = (static_cast<unsigned long long>(data.ftCreationTime.dwHighDateTime) << 32) | data.ftCreationTime.dwLowDateTime;
+	return static_cast<time_t>(hns1601 / 10000000ULL - 11644473600ULL);
 #else
 	struct stat data;
 	stat(fullPath.c_str(), &data);
-#endif
 	return data.st_ctime;
+#endif
 }
 
 //-----------------------------------------------------------------------------------------------------------
@@ -1336,16 +1292,20 @@ std::string FsGetRelPath(const std::string &fullPathFrom, const std::string &ful
 	size_t lenFrom = fullPathFrom.size();
 	size_t lenTo = fullPathTo.size();
 
-#ifdef _WIN32
-	// No relative path if the drives are different
-	if (!lenFrom || !lenTo || tolower(bufFrom[0]) != tolower(bufTo[0]))
+	if (!lenFrom || !lenTo)
 		return std::string();
+#ifdef _WIN32
+	else {
+		// No relative path if the drives are different
+		char lowFrom = bufFrom[0] >= 'A' && bufFrom[0] <= 'Z' ? bufFrom[0] | 0x60 : bufFrom[0];
+		char lowTo = bufTo[0] >= 'A' && bufTo[0] <= 'Z' ? bufTo[0] | 0x60 : bufTo[0];
+		if (lowFrom != lowTo)
+			return std::string();
+	}
 	const char *dot = ".\\";
 	const char *dotdot = "..\\";
 	const char *delim = "\\";
 #else
-	if (!lenFrom || !lenTo)
-		return std::string();
 	const char *dot = "./";
 	const char *dotdot = "../";
 	const char *delim = "/";
@@ -1361,11 +1321,11 @@ std::string FsGetRelPath(const std::string &fullPathFrom, const std::string &ful
 			break;
 
 #ifdef _WIN32
-		// Windows is case insensitive
+		// Windows FS is case insensitive
 		if (_strnicmp(bufFrom + posMatch, bufTo + posMatch, posFrom - posMatch) != 0)
 			break;
 #else
-		// Non-windows is case sensitive
+		// Non-windows FS is case sensitive
 		if (strncmp(bufFrom + posMatch, bufTo + posMatch, posFrom - posMatch) != 0)
 			break;
 #endif
@@ -1413,7 +1373,7 @@ std::string FsGetRelPath(const std::string &fullPathFrom, const std::string &ful
 std::string FsGetFullPath(const std::string &path) {
 #ifdef _WIN32
 	wchar_t out16[FS_PATH_MAX_LEN];
-	_wfullpath(out16, utf8to16(path).c_str(), FS_PATH_MAX_LEN - 1);
+	GetFullPathNameW(utf8to16(path).c_str(), FS_PATH_MAX_LEN - 1, out16, 0);
 	return std::move(utf16to8(out16));
 #else
 	char out[FS_PATH_MAX_LEN];
@@ -1462,23 +1422,30 @@ std::string FsGetPathExt(const std::string &fullPath, bool includeDot) {
 //-----------------------------------------------------------------------------------------------------------
 unsigned long long FsGetFileSize(const std::string &fullPathFile) {
 #ifdef _WIN32
-	struct _stat64 data;
-	_wstat64(utf8to16(fullPathFile).c_str(), &data);
+	WIN32_FILE_ATTRIBUTE_DATA data;
+	if (!GetFileAttributesExW(utf8to16(fullPathFile).c_str(), GetFileExInfoStandard, &data))
+		return 0;
+	return (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
 #else
 	struct stat64 data;
 	stat64(fullPathFile.c_str(), &data);
-#endif
 	return data.st_size;
+#endif
 }
 
 //-----------------------------------------------------------------------------------------------------------
 FsWatchType FsWatch(const std::string &fullPath, int *state) {
 	time_t timeMod = FsGetTimeMod(fullPath);
+#ifdef _WIN32
 	std::wstring utf16 = utf8to16(fullPath);
-	struct _stat data;
-	bool exists = _wstat(utf16.c_str(), &data) == 0;
+	DWORD attrib = GetFileAttributesW(utf16.c_str());
+	bool exists = attrib != INVALID_FILE_ATTRIBUTES;
+#else
+	struct stat data;
+	bool exists = stat(fullPath.c_str(), &data) == 0;
+#endif
 
-	int hash = static_cast<int>(((timeMod >> 48) ^ (timeMod >> 32) ^ (timeMod >> 16) ^ timeMod) << 16);
+	int hash = static_cast<int>(((timeMod >> 16) ^ timeMod) << 16);
 	if (exists)
 		hash |= 0x00008000;
 	int oldState = *state;
@@ -1549,13 +1516,13 @@ bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, v
 #else
 	gFsWalkCallback = callback;
 	gFsWalkUser = user;
-	auto funcFtw = [](const char *fullPath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) -> int {
-		if (!gFsWalkCallback(fullPath, typeflag == FTW_F, gFsWalkUser))
+	auto funcFtw = [](const char *nextPath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) -> int {
+		if (!gFsWalkCallback(nextPath, typeflag == FTW_F, gFsWalkUser))
 			return -1;
 		return 0;
 	};
 	int flags = FTW_PHYS | (type == FS_WALK_DEPTH ? FTW_DEPTH : 0);
-	return nftw(fullPathDir.c_str(), funcFtw, 64, flags);
+	return nftw(fullPath.c_str(), funcFtw, 64, flags);
 #endif
 }
 
