@@ -26,6 +26,8 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.08 - 11/16/16 - Fixed IoReadLine8 and IoReadText8 for 0 length strings and return value
+// - v1.07 - 06/20/16 - Fix for async delete-then-recreate problem in Windows
 // - v1.06 - 04/28/16 - Committed to C++ style strings and expectations
 //                    - Bit/Byte functions more consistent
 //                    - Reduced dependencies
@@ -606,9 +608,8 @@ inline unsigned long long ByteSwap64(unsigned long long value) {
 #else
 #	ifdef __APPLE__
 #		include <mach-o/dyld.h> // _NSGetExecutablePath
-#	elif defined(__linux) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-#		include <unistd.h>      // readlink, getcwd, chdir
 #	endif
+#	include <unistd.h>          // readlink, getcwd, chdir
 #	include <sys/types.h>       // This has to precede sys/stat.h
 #	include <sys/stat.h>        // stat
 #	include <ftw.h>             // recursive folder walk
@@ -623,7 +624,7 @@ static const int FS_PATH_MAX_LEN = 2048;
 static std::wstring utf8to16(const std::string &utf8) {
 	std::wstring utf16;
 	utf16.resize(FS_PATH_MAX_LEN);
-	int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), utf8.size(), &utf16[0], FS_PATH_MAX_LEN);
+	int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), &utf16[0], FS_PATH_MAX_LEN);
 	utf16.resize(size);
 	return std::move(utf16);
 }
@@ -631,7 +632,7 @@ static std::wstring utf8to16(const std::string &utf8) {
 static std::string utf16to8(const std::wstring &utf16) {
 	std::string utf8;
 	utf8.resize(FS_PATH_MAX_LEN);
-	int size = WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), utf16.size(), &utf8[0], FS_PATH_MAX_LEN, 0, 0);
+	int size = WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), static_cast<int>(utf16.size()), &utf8[0], FS_PATH_MAX_LEN, 0, 0);
 	utf8.resize(size);
 	return std::move(utf8);
 }
@@ -841,17 +842,15 @@ void IoClose(Io *io) {
 //-----------------------------------------------------------------------------------------------------------
 bool IoReadText8(const Io *io, char *buf, int bufSize) {
 	if (bufSize <= 0)
-		return false;
+		return true;
 	bufSize--;  // Remove one because we need to ensure null terminator fits
-	bool wasRead = false;
-	if (bufSize != 0)
+	bool wasRead = true;
+	while (bufSize > 0) {
 		wasRead = io->funcRead(io->handle, 1, buf);
-	while (wasRead && *buf) {
-		wasRead = false;
+		if (!wasRead || !*buf)
+			break;
 		buf++;
 		bufSize--;
-		if (bufSize != 0)
-			wasRead = io->funcRead(io->handle, 1, buf);
 	}
 	*buf = 0;
 	return wasRead;
@@ -862,26 +861,21 @@ bool IoReadLine8(const Io *io, char *buf, int bufSize) {
 	if (bufSize <= 0)
 		return false;
 	bufSize--;  // Remove one because we need to ensure null terminator fits
-	bool wasRead = false;
-	char c = 0;
-	if (bufSize != 0)
-		wasRead = io->funcRead(io->handle, 1, &c);
-	while (wasRead && c) {
-		if (c == 13 || c == 10) {
+	bool wasRead = true;
+	while (bufSize > 0) {
+		wasRead = io->funcRead(io->handle, 1, buf);
+		if (!wasRead || !*buf)
+			break;
+		if (*buf == '\r' || *buf == '\n') {
 			char c2 = 0;
 			if (io->funcRead(io->handle, 1, &c2)) {
-				if ((c == '\r' && c2 != '\n') || (c == '\n' && c2 != '\r'))
+				if ((*buf == '\r' && c2 != '\n') || (*buf == '\n' && c2 != '\r'))
 					IoSeek(io, IO_SEEK_REL, -1);
 			}
 			break;
 		}
-
-		wasRead = false;
-		*buf = c;
 		buf++;
 		bufSize--;
-		if (bufSize != 0)
-			wasRead = io->funcRead(io->handle, 1, &c);
 	}
 	*buf = 0;
 	return wasRead;
@@ -893,8 +887,11 @@ bool IoReadText8(const Io *io, std::string *pOut, int len) {
 	char buf[256];
 	int i = 0;
 	*pOut = "";
-	bool wasRead = io->funcRead(io->handle, 1, &buf[i]);
-	while (wasRead && buf[i] && len != 0) {
+	bool wasRead = true;
+	while (len != 0) {
+		wasRead = io->funcRead(io->handle, 1, &buf[i]);
+		if (!wasRead || !buf[i])
+			break;
 		i++;
 		if (i == 255) {
 			buf[i] = 0;
@@ -902,12 +899,10 @@ bool IoReadText8(const Io *io, std::string *pOut, int len) {
 			*pOut += buf;
 		}
 		len--;
-		if (len != 0)
-			wasRead = io->funcRead(io->handle, 1, &buf[i]);
 	}
 	buf[i] = 0;
 	*pOut += buf;
-	return wasRead || i > 0;
+	return wasRead;
 }
 
 //-----------------------------------------------------------------------------------------------------------
@@ -916,12 +911,15 @@ bool IoReadLine8(const Io *io, std::string *pOut) {
 	char buf[257];
 	int i = 0;
 	*pOut = "";
-	bool wasRead = io->funcRead(io->handle, 1, &buf[i]);
-	while (wasRead && buf[i]) {
-		if (buf[i] == 10 || buf[i] == 13) {
+	bool wasRead = true;
+	while (1) {
+		wasRead = io->funcRead(io->handle, 1, &buf[i]);
+		if (!wasRead || !buf[i])
+			break;
+		if (buf[i] == '\r' || buf[i] == '\n') {
 			i++;
 			if (io->funcRead(io->handle, 1, &buf[i])) {
-				if ((buf[i - 1] == 10 && buf[i] != 13) || (buf[i - 1] == 13 && buf[i] != 10)) {
+				if ((buf[i - 1] == '\r' && buf[i] != '\n') || (buf[i - 1] == '\n' && buf[i] != '\r')) {
 					i--;
 					IoSeek(io, IO_SEEK_REL, -1);
 				}
@@ -935,11 +933,10 @@ bool IoReadLine8(const Io *io, std::string *pOut) {
 			i = 0;
 			*pOut += buf;
 		}
-		wasRead = io->funcRead(io->handle, 1, &buf[i]);
 	}
 	buf[i] = 0;
 	*pOut += buf;
-	return wasRead || i > 0;
+	return wasRead;
 }
 
 //-----------------------------------------------------------------------------------------------------------
@@ -975,7 +972,7 @@ void IoWriteSVbe(const Io *io, const char *format, va_list v) {
 			case '4': { int *x = va_arg(v, int *); IoWrite32be(io, *x); break; }
 			case 'f': case 'F': { float *x = va_arg(v, float *); IoWriteFbe(io, *x); break; }
 			case 'd': case 'D': { double *x = va_arg(v, double *); IoWriteDbe(io, *x); break; }
-			default: va_end(v); return;
+			default: return;
 		}
 	}
 }
@@ -1074,8 +1071,15 @@ bool FsDeleteDir(const std::string &fullPathDir) {
 #ifdef _WIN32
 	auto funcDel = [](const std::string &fullPath, bool isFile, void * /*user*/) -> bool {
 		std::wstring utf16 = std::move(utf8to16(fullPath));
+
+		// http://stackoverflow.com/questions/3764072/c-win32-how-to-wait-for-a-pending-delete-to-complete
+		// Looks like a problem specific to Windows
+		MoveFileExW(utf16.c_str(), (utf16 + L".del.me").c_str(), MOVEFILE_WRITE_THROUGH);
+		utf16 += L".del.me";
+
 		if (isFile)
 			return DeleteFileW(utf16.c_str()) != 0;
+
 		return RemoveDirectoryW(utf16.c_str()) != 0;
 	};
 #else
