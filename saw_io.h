@@ -26,6 +26,7 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.09 - 12/07/16 - Fixed IoReadDbe and IoReadDle sign extended errors
 // - v1.08 - 11/16/16 - Fixed IoReadLine8 and IoReadText8 for 0 length strings and return value
 // - v1.07 - 06/20/16 - Fix for async delete-then-recreate problem in Windows
 // - v1.06 - 04/28/16 - Committed to C++ style strings and expectations
@@ -141,7 +142,7 @@ std::string FsGetPathDir(const std::string &fullPath, bool includeSlash);
 std::string FsGetPathFile(const std::string &fullPath, bool includeExt);
 std::string FsGetPathExt(const std::string &fullPath, bool includeDot);
 unsigned long long FsGetFileSize(const std::string &fullPathFile);
-FsWatchType FsWatch(const std::string &fullPath, int *state); // init state to 0
+FsWatchType FsWatch(const std::string &fullPath, int *state);  // init state to 0
 bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, void *user);
 
 // Io abstraction - implementations
@@ -167,10 +168,10 @@ inline float IoReadFbe(const Io *io);
 inline double IoReadDle(const Io *io);
 inline double IoReadDbe(const Io *io);
 inline bool IoReadRaw(const Io *io, size_t bytes, void *pOut);
-bool IoReadText8(const Io *io, char *buf, int bufSize);  // Stops at null, eof, or bufSize; bufSize must consider null terminator
-bool IoReadLine8(const Io *io, char *buf, int bufSize);  // Stops at null, eof, eol, or bufSize; bufSize must consider null terminator; does NOT include eol character(s) in output
-bool IoReadText8(const Io *io, std::string *pOut, int len);  // Stops at null, eof, or len if >= 0 for more secure reads
-bool IoReadLine8(const Io *io, std::string *pOut);  // Stops at null, eof, or eol
+bool IoReadText8(const Io *io, char *buf, int bufSize);      // Stops at null, eof, or bufSize; bufSize must consider null terminator; error if buf too small, null pointer, or eof at the beginning
+bool IoReadLine8(const Io *io, char *buf, int bufSize);      // Stops at null, eof, eol, or bufSize; bufSize must consider null terminator; does NOT include eol character(s) in output; error if buf too small, null pointer, or eof at the beginning
+bool IoReadText8(const Io *io, std::string *pOut, int len);  // Stops at null, eof, or len if >= 0 for more secure reads; error if null pointer or eof at the beginning
+bool IoReadLine8(const Io *io, std::string *pOut);           // Stops at null, eof, or eol; error if null pointer or eof at the beginning
 inline void IoWrite8(const Io *io, int val);
 inline void IoWrite16le(const Io *io, int val);
 inline void IoWrite16be(const Io *io, int val);
@@ -191,7 +192,7 @@ inline void BsInit(BitStreamIn *pBits, const void *pBase, unsigned int byteSize)
 inline void BsInit(BitStreamOut *pBits, void *pBase, unsigned int byteSize);
 inline bool BsReadLsb(BitStreamIn *pBits, unsigned int *pOut, unsigned char numBits);
 inline bool BsReadMsb(BitStreamIn *pBits, unsigned int *pOut, unsigned char numBits);
-inline void BsReadFlush(BitStreamIn *pBits);  // Flush partial byte if there is one
+inline void BsReadFlush(BitStreamIn *pBits);       // Flush partial byte if there is one
 inline bool BsWriteLsb(BitStreamOut *pBits, unsigned int in, unsigned char numBits);
 inline bool BsWriteMsb(BitStreamOut *pBits, unsigned int in, unsigned char numBits);
 inline void BsWriteFlushLsb(BitStreamOut *pBits);  // Flush partial byte if there is one
@@ -215,8 +216,8 @@ void BitReverseBuf8(void *pData, size_t numBytes);
 inline unsigned short ByteSwap16(unsigned short value);
 inline unsigned int ByteSwap32(unsigned int value);
 inline unsigned long long ByteSwap64(unsigned long long value);
-void ByteSwapBuf16(void *pData, size_t count); // count in words, not bytes
-void ByteSwapBuf32(void *pData, size_t count); // count in double words, not bytes
+void ByteSwapBuf16(void *pData, size_t count);  // count in words, not bytes
+void ByteSwapBuf32(void *pData, size_t count);  // count in double words, not bytes
 
 //-----------------------------------------------------------------------------------------------------------
 inline bool IoSeek(const Io *io, IoSeekType type, long long offset) {
@@ -289,16 +290,16 @@ inline float IoReadFle(const Io *io) {
 
 //-----------------------------------------------------------------------------------------------------------
 inline double IoReadDbe(const Io *io) {
-	unsigned long long high = IoRead32be(io);
-	unsigned long long low = IoRead32be(io);
+	unsigned long long high = static_cast<unsigned int>(IoRead32be(io));
+	unsigned long long low = static_cast<unsigned int>(IoRead32be(io));
 	low |= high << 32;
 	return *reinterpret_cast<double *>(&low);
 }
 
 //-----------------------------------------------------------------------------------------------------------
 inline double IoReadDle(const Io *io) {
-	unsigned long long low = IoRead32le(io);
-	unsigned long long high = IoRead32le(io);
+	unsigned long long low = static_cast<unsigned int>(IoRead32le(io));
+	unsigned long long high = static_cast<unsigned int>(IoRead32le(io));
 	low |= high << 32;
 	return *reinterpret_cast<double *>(&low);
 }
@@ -840,57 +841,76 @@ void IoClose(Io *io) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
+// Reads until null character or eof
+// Error if buffer too small, null pointer, or eof at the beginning
 bool IoReadText8(const Io *io, char *buf, int bufSize) {
-	if (bufSize <= 0)
-		return true;
-	bufSize--;  // Remove one because we need to ensure null terminator fits
-	bool wasRead = true;
-	while (bufSize > 0) {
-		wasRead = io->funcRead(io->handle, 1, buf);
-		if (!wasRead || !*buf)
-			break;
-		buf++;
-		bufSize--;
-	}
-	*buf = 0;
-	return wasRead;
-}
-
-//-----------------------------------------------------------------------------------------------------------
-bool IoReadLine8(const Io *io, char *buf, int bufSize) {
-	if (bufSize <= 0)
+	if (bufSize <= 0 || !buf || !io)
 		return false;
-	bufSize--;  // Remove one because we need to ensure null terminator fits
-	bool wasRead = true;
+	bool canHold = false;
+	bool eof = true;
 	while (bufSize > 0) {
-		wasRead = io->funcRead(io->handle, 1, buf);
-		if (!wasRead || !*buf)
-			break;
-		if (*buf == '\r' || *buf == '\n') {
-			char c2 = 0;
-			if (io->funcRead(io->handle, 1, &c2)) {
-				if ((*buf == '\r' && c2 != '\n') || (*buf == '\n' && c2 != '\r'))
-					IoSeek(io, IO_SEEK_REL, -1);
-			}
+		bool canRead = io->funcRead(io->handle, 1, buf);
+		if (canRead)
+			eof = false;
+		if (!canRead || !*buf) {
+			*buf = 0;  // in case it was end of stream
+			canHold = true;
 			break;
 		}
 		buf++;
 		bufSize--;
 	}
-	*buf = 0;
-	return wasRead;
+	return canHold && !eof;
 }
 
 //-----------------------------------------------------------------------------------------------------------
-// len = -1 reads until null character or end of stream
+// Reads until null character, eof, or eol
+// Error if buffer too small, null pointer, or eof at the beginning
+bool IoReadLine8(const Io *io, char *buf, int bufSize) {
+	if (bufSize <= 0 || !buf || !io)
+		return false;
+	bool canHold = false;
+	bool eof = true;
+	while (bufSize > 0) {
+		bool canRead = io->funcRead(io->handle, 1, buf);
+		if (canRead)
+			eof = false;
+		if (!canRead || !*buf || *buf == '\r' || *buf == '\n') {
+			if (*buf == '\r' || *buf == '\n') {
+				// Read extra character if it's a two byte newline sequence
+				char c2 = 0;
+				if (io->funcRead(io->handle, 1, &c2)) {
+					if ((*buf == '\r' && c2 != '\n') || (*buf == '\n' && c2 != '\r'))
+						IoSeek(io, IO_SEEK_REL, -1);
+				}
+			}
+			*buf = 0;
+			canHold = true;
+			break;
+		}
+		buf++;
+		bufSize--;
+	}
+	return canHold && !eof;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+// Reads until null character, eof, or len if >= 0 
+//   len = -1 reads until null character or end of stream
+// Error if null pointer or eof at the beginning
 bool IoReadText8(const Io *io, std::string *pOut, int len) {
-	char buf[256];
+	if (!pOut || !io)
+		return false;
+
+	char buf[256];  // buffered concatenation to std::string
 	int i = 0;
 	*pOut = "";
-	bool wasRead = true;
+	bool eof = true;
 	while (len != 0) {
-		wasRead = io->funcRead(io->handle, 1, &buf[i]);
-		if (!wasRead || !buf[i])
+		bool canRead = io->funcRead(io->handle, 1, &buf[i]);
+		if (canRead)
+			eof = false;
+		if (!canRead || !buf[i])
 			break;
 		i++;
 		if (i == 255) {
@@ -902,28 +922,34 @@ bool IoReadText8(const Io *io, std::string *pOut, int len) {
 	}
 	buf[i] = 0;
 	*pOut += buf;
-	return wasRead;
+	return !eof || len == 0;
 }
 
 //-----------------------------------------------------------------------------------------------------------
+// Reads until null character, eof, or eol
+// Error if null pointer or eof at the beginning
 bool IoReadLine8(const Io *io, std::string *pOut) {
+	if (!pOut || !io)
+		return false;
+
 	// 256 would be fine, but we'll need 1 extra for if we hit EOL and need to read 1 extra character
 	char buf[257];
 	int i = 0;
 	*pOut = "";
-	bool wasRead = true;
+	bool eof = true;
 	while (1) {
-		wasRead = io->funcRead(io->handle, 1, &buf[i]);
-		if (!wasRead || !buf[i])
-			break;
-		if (buf[i] == '\r' || buf[i] == '\n') {
-			i++;
-			if (io->funcRead(io->handle, 1, &buf[i])) {
-				if ((buf[i - 1] == '\r' && buf[i] != '\n') || (buf[i - 1] == '\n' && buf[i] != '\r')) {
-					i--;
-					IoSeek(io, IO_SEEK_REL, -1);
+		bool canRead = io->funcRead(io->handle, 1, &buf[i]);
+		if (canRead)
+			eof = false;
+
+		if (!canRead || !buf[i] || buf[i] == '\r' || buf[i] == '\n') {
+			if (buf[i] == '\r' || buf[i] == '\n') {
+				// Read extra character if it's a two byte newline sequence
+				char c2 = 0;
+				if (io->funcRead(io->handle, 1, &c2)) {
+					if ((buf[i] == '\r' && c2 != '\n') || (buf[i] == '\n' && c2 != '\r'))
+						IoSeek(io, IO_SEEK_REL, -1);
 				}
-				i++;
 			}
 			break;
 		}
@@ -936,7 +962,7 @@ bool IoReadLine8(const Io *io, std::string *pOut) {
 	}
 	buf[i] = 0;
 	*pOut += buf;
-	return wasRead;
+	return !eof;
 }
 
 //-----------------------------------------------------------------------------------------------------------
