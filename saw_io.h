@@ -26,6 +26,14 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.11 - 02/25/17 - Added IoOpenSerial
+//                    - Added FsEnumSerial
+//                    - Added IoOpenPipe
+//                    - Added FS_WALK_TOP for not traversing through children
+// - v1.10 - 01/30/17 - Fix for async Windows file system issues for folders and rename
+//                    - Fixed memory leak in IoOpenMem and IoOpenVec
+//                    - Added FsGetTempFile
+//                    - Added IoOpenFileInMem
 // - v1.09 - 12/07/16 - Fixed IoReadDbe and IoReadDle sign extended errors
 // - v1.08 - 11/16/16 - Fixed IoReadLine8 and IoReadText8 for 0 length strings and return value
 // - v1.07 - 06/20/16 - Fix for async delete-then-recreate problem in Windows
@@ -79,6 +87,7 @@ enum FsWatchType {
 enum FsWalkType {
 	FS_WALK_NORMAL,    // top-down traversal of file tree
 	FS_WALK_DEPTH,     // depth-first traversal of file tree
+	FS_WALK_TOP,       // only walk top level (no children)
 };
 
 enum IoSeekType {
@@ -132,6 +141,7 @@ bool FsIsRelative(const std::string &path);
 time_t FsGetTimeAccess(const std::string &fullPath);
 time_t FsGetTimeMod(const std::string &fullPath);
 time_t FsGetTimeCreate(const std::string &fullPath);
+std::string FsGetTempFile();
 std::string FsGetTempDir(bool includeSlash);
 std::string FsGetWorkingDir(bool includeSlash);
 std::string FsGetAppDir(bool includeSlash);
@@ -144,12 +154,16 @@ std::string FsGetPathExt(const std::string &fullPath, bool includeDot);
 unsigned long long FsGetFileSize(const std::string &fullPathFile);
 FsWatchType FsWatch(const std::string &fullPath, int *state);  // init state to 0
 bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, void *user);
+bool FsEnumSerial(FsWalkFunc callback, void *user);
 
 // Io abstraction - implementations
 bool IoOpenFile(Io *io, const std::string &filename, IoAccessType access);
 bool IoOpenMem(Io *io, const void *pMem, size_t size);
+bool IoOpenSerial(Io *io, const std::string &com);
+bool IoOpenPipe(Io *io, const std::string &pipename, IoAccessType access);
 #ifndef SAW_IO_NO_VECTOR
 bool IoOpenVec(Io *io, std::vector<char> *pVec);
+bool IoOpenFileInMem(Io *io, const std::string &filename, IoAccessType access);
 #endif
 void IoClose(Io *io);
 
@@ -708,8 +722,10 @@ bool IoOpenMem(Io *io, const void *pMem, size_t size) {
 
 	io->handle = pH;
 
-	if (!io->handle)
+	if (!io->handle) {
+		delete pH;
 		return false;
+	}
 
 	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
 		MemHandle *pMem = reinterpret_cast<MemHandle *>(handle);
@@ -760,6 +776,131 @@ bool IoOpenMem(Io *io, const void *pMem, size_t size) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
+bool IoOpenSerial(Io *io, const std::string &com) {
+	if (!io)
+		return false;
+#ifdef _WIN32
+	HANDLE hComm = 0;
+	hComm = CreateFileA(("\\\\.\\" + com).c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+	if (hComm == INVALID_HANDLE_VALUE)
+		return false;
+
+	io->handle = hComm;
+
+	DCB dcb = { 0 };
+	dcb.DCBlength = sizeof(DCB);
+
+	GetCommState(hComm, &dcb);
+	dcb.BaudRate = CBR_9600;
+	dcb.ByteSize = 8;
+	dcb.StopBits = ONESTOPBIT;
+	dcb.Parity = NOPARITY;
+	SetCommState(hComm, &dcb);
+
+	COMMTIMEOUTS timeouts = { 0 };
+	timeouts.ReadIntervalTimeout = 50;
+	timeouts.ReadTotalTimeoutConstant = 50;
+	timeouts.ReadTotalTimeoutMultiplier = 10;
+	timeouts.WriteTotalTimeoutConstant = 50;
+	timeouts.WriteTotalTimeoutMultiplier = 10;
+	SetCommTimeouts(hComm, &timeouts);
+
+	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
+		SetCommMask(handle, EV_RXCHAR);
+		DWORD dwEventMask = 0;
+		while (dwEventMask != EV_RXCHAR)
+			WaitCommEvent(handle, &dwEventMask, NULL);
+
+		size_t total = 0;
+		char *pOut8 = reinterpret_cast<char *>(pOut);
+		while (total < bytes) {
+			char c = 0;
+			DWORD read = 0;
+			ReadFile(handle, &c, 1, &read, NULL);
+			pOut8[total] = c;
+			total += read;
+		}
+		return true;
+	};
+	io->funcWrite = [](void *handle, size_t bytes, const void *pIn) -> bool {
+		DWORD written = 0;
+		WriteFile(handle, pIn, static_cast<DWORD>(bytes), &written, NULL);
+		return written == bytes;
+	};
+	io->funcClose = [](void *handle) {
+		CloseHandle(handle);
+	};
+#endif
+
+	io->funcSeek = [](void * /*handle*/, IoSeekType /*type*/, long long /*offset*/) -> bool {
+		return false;
+	};
+	io->funcTell = [](void * /*handle*/) -> long long {
+		return -1;
+	};
+
+	return true;
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool IoOpenPipe(Io *io, const std::string &pipename, IoAccessType access) {
+	if (!io)
+		return false;
+
+#ifdef _WIN32
+	HANDLE hPipe = 0;
+	std::wstring utf16 = L"\\\\.\\pipe\\" + utf8to16(pipename);
+
+	switch (access) {
+	case IO_ACCESS_RW_NEW: 
+		hPipe = CreateNamedPipe(utf16.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE, 1, 1, 1, 0, NULL);
+		break;
+	case IO_ACCESS_RW: 
+		hPipe = CreateFileW(utf16.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (hPipe == INVALID_HANDLE_VALUE)
+			hPipe = CreateNamedPipe(utf16.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE, 1, 1, 1, 0, NULL);
+		break;
+	case IO_ACCESS_R: 
+		hPipe = CreateFileW(utf16.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		break;
+	default: 
+		return false;
+	}
+	if (hPipe == INVALID_HANDLE_VALUE)
+		return false;
+
+	io->handle = hPipe;
+
+	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
+		DWORD read = 0;
+		ReadFile(handle, pOut, static_cast<DWORD>(bytes), &read, NULL);
+		return read == bytes;
+	};
+	io->funcWrite = [](void *handle, size_t bytes, const void *pIn) -> bool {
+		if (!ConnectNamedPipe(handle, NULL)) {
+			if (GetLastError() != ERROR_PIPE_CONNECTED)
+				return false;
+		}
+		DWORD written = 0;
+		WriteFile(handle, pIn, static_cast<DWORD>(bytes), &written, NULL);
+		return written == bytes;
+	};
+	io->funcClose = [](void *handle) {
+		CloseHandle(handle);
+	};
+#endif
+
+	io->funcSeek = [](void * /*handle*/, IoSeekType /*type*/, long long /*offset*/) -> bool {
+		return false;
+	};
+	io->funcTell = [](void * /*handle*/) -> long long {
+		return -1;
+	};
+
+	return true;
+}
+
+//-----------------------------------------------------------------------------------------------------------
 #ifndef SAW_IO_NO_VECTOR
 bool IoOpenVec(Io *io, std::vector<char> *pVec) {
 	struct VecHandle {
@@ -775,8 +916,10 @@ bool IoOpenVec(Io *io, std::vector<char> *pVec) {
 
 	io->handle = pH;
 
-	if (!io->handle)
+	if (!io->handle) {
+		delete pH;
 		return false;
+	}
 
 	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
 		VecHandle *pVec = reinterpret_cast<VecHandle *>(handle);
@@ -821,6 +964,65 @@ bool IoOpenVec(Io *io, std::vector<char> *pVec) {
 	};
 	io->funcClose = [](void *handle) {
 		delete reinterpret_cast<VecHandle *>(handle);
+	};
+
+	return true;
+}
+
+bool IoOpenFileInMem(Io *io, const std::string &filename, IoAccessType access) {
+	struct FileMemHandle {
+		Io ioMem;
+		std::vector<char> mem;
+		bool closeWrite;
+	};
+
+	if (!io)
+		return false;
+	FileMemHandle *pH = new FileMemHandle;
+	if (!IoOpenVec(&pH->ioMem, &pH->mem)) {
+		delete pH;
+		return false;
+	}
+	pH->closeWrite = access == IoAccessType::IO_ACCESS_RW_NEW || access == IoAccessType::IO_ACCESS_RW;
+	io->handle = pH;
+
+	if (!io->handle) {
+		delete pH;
+		return false;
+	}
+
+	if (access == IoAccessType::IO_ACCESS_R || access == IoAccessType::IO_ACCESS_RW) {
+		Io ioFile;
+		if (!IoOpenFile(&ioFile, filename, access)) {
+			delete pH;
+			return false;
+		}
+		size_t size = static_cast<size_t>(IoSize(&ioFile));
+		pH->mem.resize(size);
+		IoReadRaw(&ioFile, size, &pH->mem[0]);
+		IoClose(&ioFile);
+	}
+
+	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
+		FileMemHandle *pVec = reinterpret_cast<FileMemHandle *>(handle);
+		return pVec->ioMem.funcRead(pVec->ioMem.handle, bytes, pOut);
+	};
+	io->funcWrite = [](void *handle, size_t bytes, const void *pIn) -> bool {
+		FileMemHandle *pVec = reinterpret_cast<FileMemHandle *>(handle);
+		return pVec->ioMem.funcWrite(pVec->ioMem.handle, bytes, pIn);
+	};
+	io->funcSeek = [](void *handle, IoSeekType type, long long offset) -> bool {
+		FileMemHandle *pVec = reinterpret_cast<FileMemHandle *>(handle);
+		return pVec->ioMem.funcSeek(pVec->ioMem.handle, type, offset);
+	};
+	io->funcTell = [](void *handle) -> long long {
+		FileMemHandle *pVec = reinterpret_cast<FileMemHandle *>(handle);
+		return pVec->ioMem.funcTell(pVec->ioMem.handle);
+	};
+	io->funcClose = [](void *handle) {
+		FileMemHandle *pVec = reinterpret_cast<FileMemHandle *>(handle);
+		pVec->ioMem.funcClose(pVec->ioMem.handle);
+		delete reinterpret_cast<FileMemHandle *>(handle);
 	};
 
 	return true;
@@ -1096,23 +1298,15 @@ bool FsCreateDir(const std::string &fullPathDir) {
 bool FsDeleteDir(const std::string &fullPathDir) {
 #ifdef _WIN32
 	auto funcDel = [](const std::string &fullPath, bool isFile, void * /*user*/) -> bool {
-		std::wstring utf16 = std::move(utf8to16(fullPath));
-
-		// http://stackoverflow.com/questions/3764072/c-win32-how-to-wait-for-a-pending-delete-to-complete
-		// Looks like a problem specific to Windows
-		MoveFileExW(utf16.c_str(), (utf16 + L".del.me").c_str(), MOVEFILE_WRITE_THROUGH);
-		utf16 += L".del.me";
-
 		if (isFile)
-			return DeleteFileW(utf16.c_str()) != 0;
-
-		return RemoveDirectoryW(utf16.c_str()) != 0;
+			return FsDeleteFile(fullPath);
+		return RemoveDirectoryW(utf8to16(fullPath).c_str()) != 0;
 	};
 #else
 	auto funcDel = [](const std::string &fullPath, bool isFile, void * /*user*/) -> bool {
 		if (isFile)
 			return unlink(fullPath.c_str()) == 0;
-		return rmdir(utf16.c_str()) == 0;
+		return rmdir(fullPath.c_str()) == 0;
 	};
 #endif
 	return FsWalk(fullPathDir, FS_WALK_DEPTH, funcDel, 0);
@@ -1121,7 +1315,13 @@ bool FsDeleteDir(const std::string &fullPathDir) {
 //-----------------------------------------------------------------------------------------------------------
 bool FsDeleteFile(const std::string &fullPathFile) {
 #ifdef _WIN32
-	return DeleteFileW(utf8to16(fullPathFile).c_str()) != 0;
+	// http://stackoverflow.com/questions/3764072/c-win32-how-to-wait-for-a-pending-delete-to-complete
+	// Looks like a problem specific to Windows
+	std::wstring tempFile16 = std::move(utf8to16(FsGetTempFile()));
+	if (MoveFileExW(utf8to16(fullPathFile).c_str(), tempFile16.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH | MOVEFILE_COPY_ALLOWED) == 0)
+		return false;
+
+	return DeleteFileW(tempFile16.c_str()) != 0;
 #else
 	return unlink(fullPathFile.c_str()) == 0;
 #endif
@@ -1130,7 +1330,7 @@ bool FsDeleteFile(const std::string &fullPathFile) {
 //-----------------------------------------------------------------------------------------------------------
 bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew) {
 #ifdef _WIN32
-	return MoveFileW(utf8to16(fullPathOld).c_str(), utf8to16(fullPathNew).c_str()) != 0;
+	return MoveFileExW(utf8to16(fullPathOld).c_str(), utf8to16(fullPathNew).c_str(), MOVEFILE_WRITE_THROUGH | MOVEFILE_COPY_ALLOWED) != 0;
 #else
 	return rename(fullPathOld.c_str(), fullPathNew.c_str()) != -1;
 #endif
@@ -1243,6 +1443,24 @@ time_t FsGetTimeCreate(const std::string &fullPath) {
 	struct stat data;
 	stat(fullPath.c_str(), &data);
 	return data.st_ctime;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetTempFile() {
+#ifdef _WIN32
+	wchar_t path[FS_PATH_MAX_LEN];
+	wchar_t file[FS_PATH_MAX_LEN];
+	GetTempPathW(FS_PATH_MAX_LEN, path);
+	GetTempFileNameW(path, L"saw", 0, file);
+	return std::move(utf16to8(file));
+#else
+	char *path = ".sawXXXXXX";
+	int fd = mkstemp(path);
+	if (fd == -1)
+		return "";
+	close(fd);
+	return std::move(std::string(path));
 #endif
 }
 
@@ -1517,7 +1735,7 @@ bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, v
 			bool isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
 			
 			std::string nextPath = std::move(utf16to8(fullPath16 + L'\\' + fd.cFileName));
-			if (isDir) {
+			if (isDir && type != FS_WALK_TOP) {
 				if (!FsWalk(nextPath, type, callback, user)) {
 					FindClose(hEnum);
 					return false;
@@ -1544,6 +1762,17 @@ bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, v
 
 	return true;
 #else
+	if (type == FS_WALK_TOP) {
+		struct dirent *dir = nullptr;
+		DIR *d = opendir(fullPath.c_str());
+		if (d) {
+			while ((dir = readdir(d)) != NULL)
+				callback(dir->d_name, dir->d_type != DT_DIR, user);
+
+			closedir(d);
+		}
+	}
+
 	gFsWalkCallback = callback;
 	gFsWalkUser = user;
 	auto funcFtw = [](const char *nextPath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) -> int {
@@ -1554,6 +1783,34 @@ bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, v
 	int flags = FTW_PHYS | (type == FS_WALK_DEPTH ? FTW_DEPTH : 0);
 	return nftw(fullPath.c_str(), funcFtw, 64, flags);
 #endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsEnumSerial(FsWalkFunc callback, void *user) {
+#ifdef _WIN32
+	HKEY hKey = 0;
+	int ret = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DEVICEMAP\\SERIALCOMM", NULL, KEY_READ, &hKey);
+	// Might not exist
+	if (ret != ERROR_SUCCESS)
+		return true;
+
+	DWORD numVal = 0;
+	ret = RegQueryInfoKey(hKey, NULL, NULL, NULL, NULL, NULL, NULL, &numVal, NULL, NULL, NULL, NULL);
+	if (ret != ERROR_SUCCESS)
+		return false;
+	for (DWORD i = 0; i < numVal; i++) {
+		char name[512];
+		DWORD size = 512;
+		DWORD type = 0;
+		unsigned char data[512];
+		DWORD sizeData = 512;
+		ret = RegEnumValueA(hKey, i, name, &size, NULL, &type, data, &sizeData);
+		if (ret == ERROR_SUCCESS && type == REG_SZ)
+			callback(reinterpret_cast<char *>(data), true, user);
+	}	
+#endif
+	
+	return true;
 }
 
 }  // namespace
