@@ -1,5 +1,5 @@
 // saw_io.h - Cross platform file system manipulation
-//          - Io abstraction including file and memory implementations
+//          - Io abstraction including file, memory, pipe, COM implementations
 //          - Bit streaming
 //          - Bit twiddling and byte swapping          
 //
@@ -26,20 +26,25 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.15 - 05/24/17 - Added serial port configuration support
+// - v1.14 - 05/15/17 - Fixed return logic in FsWalk (Linux)
+//                    - Fixed FsGetUserDir to work in Linux
+// - v1.13 - 04/24/17 - Added FsCopyFile
+// - v1.12 - 04/19/17 - Added FsGetUserDir
 // - v1.11 - 02/25/17 - Added IoOpenSerial
 //                    - Added FsEnumSerial
 //                    - Added IoOpenPipe
 //                    - Added FS_WALK_TOP for not traversing through children
-// - v1.10 - 01/30/17 - Fix for async Windows file system issues for folders and rename
+// - v1.10 - 01/30/17 - Fixed async Windows file system issues for folders and rename
 //                    - Fixed memory leak in IoOpenMem and IoOpenVec
 //                    - Added FsGetTempFile
 //                    - Added IoOpenFileInMem
 // - v1.09 - 12/07/16 - Fixed IoReadDbe and IoReadDle sign extended errors
 // - v1.08 - 11/16/16 - Fixed IoReadLine8 and IoReadText8 for 0 length strings and return value
-// - v1.07 - 06/20/16 - Fix for async delete-then-recreate problem in Windows
-// - v1.06 - 04/28/16 - Committed to C++ style strings and expectations
-//                    - Bit/Byte functions more consistent
-//                    - Reduced dependencies
+// - v1.07 - 06/20/16 - Fixed async delete-then-recreate problem in Windows
+// - v1.06 - 04/28/16 - Refactored and committed to C++ style strings and expectations
+//                    - Refactored bit/byte functions for consistency
+//                    - Refactored for reduced dependencies
 // - v1.05 - 04/20/16 - Fixed FsWatch on 32-bit platforms
 //                    - Fixed FsWalk in linux
 // - v1.04 - 04/16/16 - Added FsGetRelPath
@@ -90,6 +95,20 @@ enum FsWalkType {
 	FS_WALK_TOP,       // only walk top level (no children)
 };
 
+enum IoStopType {
+	IO_STOP_1,
+	IO_STOP_1_5,
+	IO_STOP_2,
+};
+
+enum IoParityType {
+	IO_PARITY_NONE,
+	IO_PARITY_ODD,
+	IO_PARITY_EVEN,
+	IO_PARITY_MARK,
+	IO_PARITY_SPACE,
+};
+
 enum IoSeekType {
 	IO_SEEK_SET,
 	IO_SEEK_REL,
@@ -132,9 +151,11 @@ bool FsCreateDir(const std::string &fullPathDir);
 bool FsDeleteDir(const std::string &fullPathDir);
 bool FsDeleteFile(const std::string &fullPathFile);
 bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew);
+bool FsCopyFile(const std::string &fullPathSrc, const std::string &fullPathDest);
 bool FsSetWorkingDir(const std::string &fullPathDir);
 bool FsIsDir(const std::string &fullPath);
 bool FsIsFile(const std::string &fullPath);
+bool FsIsPipe(const std::string &pipeName);
 bool FsIsReadOnly(const std::string &fullPath);
 bool FsIsHidden(const std::string &fullPath);
 bool FsIsRelative(const std::string &path);
@@ -144,8 +165,11 @@ time_t FsGetTimeCreate(const std::string &fullPath);
 std::string FsGetTempFile();
 std::string FsGetTempDir(bool includeSlash);
 std::string FsGetWorkingDir(bool includeSlash);
+std::string FsGetUserDir(const std::string &appName, bool includeSlash);
 std::string FsGetAppDir(bool includeSlash);
 std::string FsGetAppPath();
+std::string FsGetModuleDir(bool includeSlash);
+std::string FsGetModulePath();
 std::string FsGetRelPath(const std::string &fullPathFrom, const std::string &fullPathTo);
 std::string FsGetFullPath(const std::string &path);
 std::string FsGetPathDir(const std::string &fullPath, bool includeSlash);
@@ -159,8 +183,8 @@ bool FsEnumSerial(FsWalkFunc callback, void *user);
 // Io abstraction - implementations
 bool IoOpenFile(Io *io, const std::string &filename, IoAccessType access);
 bool IoOpenMem(Io *io, const void *pMem, size_t size);
-bool IoOpenSerial(Io *io, const std::string &com);
-bool IoOpenPipe(Io *io, const std::string &pipename, IoAccessType access);
+bool IoOpenSerial(Io *io, const std::string &com, int baudRate = 38400, int byteSize = 8, IoStopType stopBits = IO_STOP_1, IoParityType parity = IO_PARITY_NONE);
+bool IoOpenPipe(Io *io, const std::string &pipeName, IoAccessType access);
 #ifndef SAW_IO_NO_VECTOR
 bool IoOpenVec(Io *io, std::vector<char> *pVec);
 bool IoOpenFileInMem(Io *io, const std::string &filename, IoAccessType access);
@@ -620,6 +644,7 @@ inline unsigned long long ByteSwap64(unsigned long long value) {
 #include <memory.h>             // memcpy
 #ifdef _WIN32
 #	include <windows.h>         // many windows-specific functions
+#	include <shlobj.h>          // get appdata folders
 #else
 #	ifdef __APPLE__
 #		include <mach-o/dyld.h> // _NSGetExecutablePath
@@ -627,8 +652,14 @@ inline unsigned long long ByteSwap64(unsigned long long value) {
 #	include <unistd.h>          // readlink, getcwd, chdir
 #	include <sys/types.h>       // This has to precede sys/stat.h
 #	include <sys/stat.h>        // stat
+#	include <fcntl.h>           // open, O_* macros
 #	include <ftw.h>             // recursive folder walk
+#	include <dirent.h>          // scandir, opendir, readdir
 #	include <stdlib.h>          // getenv, realpath
+#	include <libgen.h>          // basename
+#	include <sys/ioctl.h>       // ioctl for serial port stuff
+#	include <linux/serial.h>    // serial_struct
+#	include <pwd.h>
 #endif
 
 namespace saw {
@@ -776,7 +807,7 @@ bool IoOpenMem(Io *io, const void *pMem, size_t size) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
-bool IoOpenSerial(Io *io, const std::string &com) {
+bool IoOpenSerial(Io *io, const std::string &com, int baudRate, int byteSize, IoStopType stopBits, IoParityType parity) {
 	if (!io)
 		return false;
 #ifdef _WIN32
@@ -791,38 +822,68 @@ bool IoOpenSerial(Io *io, const std::string &com) {
 	dcb.DCBlength = sizeof(DCB);
 
 	GetCommState(hComm, &dcb);
-	dcb.BaudRate = CBR_9600;
-	dcb.ByteSize = 8;
-	dcb.StopBits = ONESTOPBIT;
-	dcb.Parity = NOPARITY;
-	SetCommState(hComm, &dcb);
+	dcb.BaudRate = baudRate;
+	dcb.ByteSize = byteSize;
+	switch (stopBits) {
+	case IO_STOP_1: dcb.StopBits = ONESTOPBIT; break;
+	case IO_STOP_1_5: dcb.StopBits = ONE5STOPBITS; break;
+	case IO_STOP_2: dcb.StopBits = TWOSTOPBITS; break;
+	}
+	switch (parity) {
+	case IO_PARITY_NONE: dcb.Parity = NOPARITY; break;
+	case IO_PARITY_EVEN: dcb.Parity = EVENPARITY; break;
+	case IO_PARITY_ODD: dcb.Parity = ODDPARITY; break;
+	case IO_PARITY_MARK: dcb.Parity = MARKPARITY; break;
+	case IO_PARITY_SPACE: dcb.Parity = SPACEPARITY; break;
+	}
+
+	if (!SetCommState(hComm, &dcb)) {
+		CloseHandle(hComm);
+		return false;
+	}
 
 	COMMTIMEOUTS timeouts = { 0 };
-	timeouts.ReadIntervalTimeout = 50;
-	timeouts.ReadTotalTimeoutConstant = 50;
-	timeouts.ReadTotalTimeoutMultiplier = 10;
+	timeouts.ReadIntervalTimeout = 0;
+	timeouts.ReadTotalTimeoutConstant = 1000;  // wait 1000ms
+	timeouts.ReadTotalTimeoutMultiplier = 0;   //     +   0ms * bytes
 	timeouts.WriteTotalTimeoutConstant = 50;
 	timeouts.WriteTotalTimeoutMultiplier = 10;
+	//timeouts.ReadIntervalTimeout = 500;
+	//timeouts.ReadTotalTimeoutConstant = 0;  // wait 1000ms
+	//timeouts.ReadTotalTimeoutMultiplier = 500;   //     +   0ms * bytes
+	//timeouts.WriteTotalTimeoutConstant = 10;
+	//timeouts.WriteTotalTimeoutMultiplier = 500;
 	SetCommTimeouts(hComm, &timeouts);
 
 	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
-		SetCommMask(handle, EV_RXCHAR);
+		// Return false if data not ready so we don't lock up
+		/*SetCommMask(handle, EV_RXCHAR);
 		DWORD dwEventMask = 0;
 		while (dwEventMask != EV_RXCHAR)
-			WaitCommEvent(handle, &dwEventMask, NULL);
+			WaitCommEvent(handle, &dwEventMask, NULL);*/
 
+		/*DWORD read = 0;
+		if (!ReadFile(handle, pOut, bytes, &read, NULL))
+			return false;
+		if (read == 0)
+			return false;*/
 		size_t total = 0;
 		char *pOut8 = reinterpret_cast<char *>(pOut);
 		while (total < bytes) {
 			char c = 0;
 			DWORD read = 0;
-			ReadFile(handle, &c, 1, &read, NULL);
+			// Returns after timeout even if no data, just says there was no data...
+			if (!ReadFile(handle, &c, 1, &read, NULL))
+				return false;
+			if (read == 0)
+				return false;
 			pOut8[total] = c;
 			total += read;
 		}
 		return true;
 	};
 	io->funcWrite = [](void *handle, size_t bytes, const void *pIn) -> bool {
+		PurgeComm(handle, 0xf);
 		DWORD written = 0;
 		WriteFile(handle, pIn, static_cast<DWORD>(bytes), &written, NULL);
 		return written == bytes;
@@ -830,6 +891,8 @@ bool IoOpenSerial(Io *io, const std::string &com) {
 	io->funcClose = [](void *handle) {
 		CloseHandle(handle);
 	};
+#else
+	//   "/dev/" + com
 #endif
 
 	io->funcSeek = [](void * /*handle*/, IoSeekType /*type*/, long long /*offset*/) -> bool {
@@ -843,22 +906,29 @@ bool IoOpenSerial(Io *io, const std::string &com) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
-bool IoOpenPipe(Io *io, const std::string &pipename, IoAccessType access) {
+bool IoOpenPipe(Io *io, const std::string &pipeName, IoAccessType access) {
 	if (!io)
 		return false;
 
 #ifdef _WIN32
 	HANDLE hPipe = 0;
-	std::wstring utf16 = L"\\\\.\\pipe\\" + utf8to16(pipename);
+	std::wstring utf16 = L"\\\\.\\pipe\\" + utf8to16(pipeName);
 
 	switch (access) {
 	case IO_ACCESS_RW_NEW: 
-		hPipe = CreateNamedPipe(utf16.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE, 1, 1, 1, 0, NULL);
+		hPipe = CreateNamedPipeW(utf16.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE, 1, 1, 1, 0, NULL);
+		if (!ConnectNamedPipe(hPipe, NULL)) {
+			if (GetLastError() != ERROR_PIPE_CONNECTED)
+				return false;
+		}
 		break;
 	case IO_ACCESS_RW: 
-		hPipe = CreateFileW(utf16.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (WaitNamedPipeW(utf16.c_str(), 3000) == 0)
+			return false;
+		hPipe = CreateFileW(utf16.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+		
 		if (hPipe == INVALID_HANDLE_VALUE)
-			hPipe = CreateNamedPipe(utf16.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE, 1, 1, 1, 0, NULL);
+			return false;
 		break;
 	case IO_ACCESS_R: 
 		hPipe = CreateFileW(utf16.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -872,15 +942,17 @@ bool IoOpenPipe(Io *io, const std::string &pipename, IoAccessType access) {
 	io->handle = hPipe;
 
 	io->funcRead = [](void *handle, size_t bytes, void *pOut) -> bool {
+		DWORD avail = 0;
+		if (!PeekNamedPipe(handle, 0, 0, 0, &avail, 0))
+			return false;
+		if (avail == 0)
+			return bytes == 0;
 		DWORD read = 0;
+		// Synchronized read doesn't return until it gets data
 		ReadFile(handle, pOut, static_cast<DWORD>(bytes), &read, NULL);
 		return read == bytes;
 	};
 	io->funcWrite = [](void *handle, size_t bytes, const void *pIn) -> bool {
-		if (!ConnectNamedPipe(handle, NULL)) {
-			if (GetLastError() != ERROR_PIPE_CONNECTED)
-				return false;
-		}
 		DWORD written = 0;
 		WriteFile(handle, pIn, static_cast<DWORD>(bytes), &written, NULL);
 		return written == bytes;
@@ -1337,6 +1409,25 @@ bool FsRename(const std::string &fullPathOld, const std::string &fullPathNew) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
+bool FsCopyFile(const std::string &fullPathSrc, const std::string &fullPathDest) {
+#ifdef _WIN32
+	return CopyFileW(utf8to16(fullPathSrc).c_str(), utf8to16(fullPathDest).c_str(), FALSE) != 0;
+#else
+	char buf[32768];
+	size_t size;
+
+	int source = open(fullPathSrc.c_str(), O_RDONLY, 0);
+	int dest = open(fullPathDest.c_str(), O_WRONLY | O_CREAT, 0644);
+
+	while ((size = read(source, buf, 32768)) > 0)
+		write(dest, buf, size);
+
+	close(source);
+	close(dest); 
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
 bool FsSetWorkingDir(const std::string &fullPathDir) {
 #ifdef _WIN32
 	return SetCurrentDirectoryW(utf8to16(fullPathDir).c_str()) != 0;
@@ -1352,7 +1443,7 @@ bool FsIsDir(const std::string &fullPath) {
 	return attrib != INVALID_FILE_ATTRIBUTES && (attrib & FILE_ATTRIBUTE_DIRECTORY);
 #else
 	struct stat data;
-	return stat(fullPath.c_str(), &data) == 0 && (data.st_mode & __S_IFDIR);
+	return stat(fullPath.c_str(), &data) == 0 && (S_ISDIR(data.st_mode));
 #endif
 }
 
@@ -1363,7 +1454,17 @@ bool FsIsFile(const std::string &fullPath) {
 	return attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY);
 #else
 	struct stat data;
-	return stat(fullPath.c_str(), &data) == 0 && (data.st_mode & __S_IFREG);
+	return stat(fullPath.c_str(), &data) == 0 && (S_ISREG(data.st_mode));
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+bool FsIsPipe(const std::string &pipeName) {
+#ifdef _WIN32
+	return WaitNamedPipeW(utf8to16("\\\\.\\pipe\\" + pipeName).c_str(), 0) != 0;
+#else
+	struct stat data;
+	return stat(pipeName.c_str(), &data) == 0 && (S_ISFIFO(data.st_mode));
 #endif
 }
 
@@ -1455,7 +1556,7 @@ std::string FsGetTempFile() {
 	GetTempFileNameW(path, L"saw", 0, file);
 	return std::move(utf16to8(file));
 #else
-	char *path = ".sawXXXXXX";
+	char path[] = ".sawXXXXXX";
 	int fd = mkstemp(path);
 	if (fd == -1)
 		return "";
@@ -1492,6 +1593,26 @@ std::string FsGetWorkingDir(bool includeSlash) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
+std::string FsGetUserDir(const std::string &appName, bool includeSlash) {
+#ifdef _WIN32
+	wchar_t path[FS_PATH_MAX_LEN];
+	// CSIDL_APPDATA is roaming (user-specific)
+	// CSIDL_LOCAL_APPDATA is local (user-specific machine-specific)
+	// CSIDL_COMMON_APPDATA is local (machine-specific)
+	SHGetFolderPathW(0, CSIDL_LOCAL_APPDATA, 0, SHGFP_TYPE_CURRENT, path);
+	return std::move(utf16to8(path) + "\\" + appName + (includeSlash ? "\\" : ""));
+#else
+	const char *base = getenv("XDG_CONFIG_HOME");
+	if (!base)
+		base = getenv("HOME");
+	if (!base)
+		base = getpwuid(getuid())->pw_dir;
+
+	return std::move(base + std::string("/.config/") + appName + (includeSlash ? "/" : ""));
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
 std::string FsGetAppDir(bool includeSlash) {
 	return std::move(FsGetPathDir(FsGetAppPath(), includeSlash));
 }
@@ -1500,7 +1621,7 @@ std::string FsGetAppDir(bool includeSlash) {
 std::string FsGetAppPath() {
 #ifdef _WIN32
 	wchar_t path[FS_PATH_MAX_LEN];
-	DWORD len = GetModuleFileNameW(NULL, path, FS_PATH_MAX_LEN);
+	DWORD len = GetModuleFileNameW(0, path, FS_PATH_MAX_LEN);
 	if (len <= 0 || len == FS_PATH_MAX_LEN)
 		path[0] = 0;
 	return std::move(utf16to8(path));
@@ -1530,6 +1651,26 @@ std::string FsGetAppPath() {
 	if (_NSGetExecutablePath(path, &bufSize) != 0)
 		path[0] = 0;
 	return path;
+#endif
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetModuleDir(bool includeSlash) {
+	return std::move(FsGetPathDir(FsGetModulePath(), includeSlash));
+}
+
+//-----------------------------------------------------------------------------------------------------------
+std::string FsGetModulePath() {
+#ifdef _WIN32
+	wchar_t path[FS_PATH_MAX_LEN];
+	HMODULE handle = 0;
+	GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCTSTR)FsGetModulePath, &handle);
+	DWORD len = GetModuleFileNameW(handle, path, FS_PATH_MAX_LEN);
+	if (len <= 0 || len == FS_PATH_MAX_LEN)
+		path[0] = 0;
+	return std::move(utf16to8(path));
+#else
+	return FsGetAppPath();
 #endif
 }
 
@@ -1770,7 +1911,9 @@ bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, v
 				callback(dir->d_name, dir->d_type != DT_DIR, user);
 
 			closedir(d);
+			return true;
 		}
+		return false;
 	}
 
 	gFsWalkCallback = callback;
@@ -1781,7 +1924,7 @@ bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, v
 		return 0;
 	};
 	int flags = FTW_PHYS | (type == FS_WALK_DEPTH ? FTW_DEPTH : 0);
-	return nftw(fullPath.c_str(), funcFtw, 64, flags);
+	return nftw(fullPath.c_str(), funcFtw, 64, flags) == 0;
 #endif
 }
 
@@ -1796,8 +1939,10 @@ bool FsEnumSerial(FsWalkFunc callback, void *user) {
 
 	DWORD numVal = 0;
 	ret = RegQueryInfoKey(hKey, NULL, NULL, NULL, NULL, NULL, NULL, &numVal, NULL, NULL, NULL, NULL);
-	if (ret != ERROR_SUCCESS)
+	if (ret != ERROR_SUCCESS) {
+		RegCloseKey(hKey);
 		return false;
+	}
 	for (DWORD i = 0; i < numVal; i++) {
 		char name[512];
 		DWORD size = 512;
@@ -1808,6 +1953,51 @@ bool FsEnumSerial(FsWalkFunc callback, void *user) {
 		if (ret == ERROR_SUCCESS && type == REG_SZ)
 			callback(reinterpret_cast<char *>(data), true, user);
 	}	
+	RegCloseKey(hKey);
+#else
+	struct dirent **names = nullptr;
+	int n = scandir("/sys/class/tty/", &names, NULL, NULL);
+	if (n < 0)
+		return false;
+
+	while (n--) {
+		if (names[n]->d_name[0] != '.') {
+			std::string testDev = std::string("/sys/class/tty/") + names[n]->d_name;
+			std::string driver = testDev + "/device";
+			struct stat data;
+			if (lstat(driver.c_str(), &data) == 0 && S_ISLNK(data.st_mode)) {
+				char path[FS_PATH_MAX_LEN];
+				driver += "/driver";
+
+				ssize_t len = readlink(driver.c_str(), path, FS_PATH_MAX_LEN);
+				if (len <= 0 || len == FS_PATH_MAX_LEN)
+					path[0] = 0;
+				else {
+					path[len] = 0;  // readlink doesn't null terminate
+					driver = basename(path);
+					
+					// Has a driver, check device
+					std::string dev = std::string("/dev/") + names[n]->d_name;
+					
+					if (driver == "serial8250") {
+						int fd = open(dev.c_str(), O_RDWR | O_NONBLOCK | O_NOCTTY);
+						if (fd >= 0) {
+							struct serial_struct info;
+							if (ioctl(fd, TIOCGSERIAL, &info) == 0) {
+								if (info.type != PORT_UNKNOWN)
+									callback(names[n]->d_name, true, user);
+							}
+							close(fd);
+						}
+					}
+					else
+						callback(names[n]->d_name, true, user);
+				}
+			}
+		}
+		free(names[n]);
+	}
+	free(names);
 #endif
 	
 	return true;
