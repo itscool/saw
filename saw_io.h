@@ -26,6 +26,8 @@
 
 //-----------------------------------------------------------------------------------------------------------
 // History
+// - v1.17 - 04/02/18 - Added FsLoadTextFile common functionality
+//                    - Added FsLoadBinFile common functionality
 // - v1.16 - 03/07/18 - Fixed implicit cast warning
 //                    - Fixed serial port buffer incompletion (flush/purge)
 //                    - Fixed FsGetFullPath to include trailing directory slash in both Windows and Linux
@@ -70,19 +72,17 @@
 //-----------------------------------------------------------------------------------------------------------
 // Usage
 // - Define SAW_IO_IMPLEMENTATION before inclusion in one file for library implementation
-// - Define SAW_IO_NO_VECTOR to remove std::vector dependencies
 // - Functionality is in saw:: namespace
 
 //-----------------------------------------------------------------------------------------------------------
 // Todo
+// - IoOpenPipe for linux
 
 #ifndef _SAW_IO_H_INCLUDED
 #define _SAW_IO_H_INCLUDED
 
 #include <string>
-#ifndef SAW_IO_NO_VECTOR
-#	include <vector>
-#endif
+#include <vector>
 
 namespace saw {
 
@@ -186,19 +186,19 @@ unsigned long long FsGetFileSize(const std::string &fullPathFile);
 FsWatchType FsWatch(const std::string &fullPath, int *state);  // init state to 0
 bool FsWalk(const std::string &fullPath, FsWalkType type, FsWalkFunc callback, void *user);
 bool FsEnumSerial(FsWalkFunc callback, void *user);
+bool FsLoadTextFile(const std::string &filename, std::string *pOut);
+bool FsLoadBinFile(const std::string &filename, std::vector<unsigned char> *pVec);
 
 // Io abstraction - implementations
 bool IoOpenFile(Io *io, const std::string &filename, IoAccessType access);
 bool IoOpenMem(Io *io, const void *pMem, size_t size);
 bool IoOpenSerial(Io *io, const std::string &com, int baudRate = 38400, int byteSize = 8, IoStopType stopBits = IO_STOP_1, IoParityType parity = IO_PARITY_NONE);
 bool IoOpenPipe(Io *io, const std::string &pipeName, IoAccessType access);
-#ifndef SAW_IO_NO_VECTOR
-bool IoOpenVec(Io *io, std::vector<char> *pVec);
+bool IoOpenVec(Io *io, std::vector<unsigned char> *pVec);
 bool IoOpenFileInMem(Io *io, const std::string &filename, IoAccessType access);
-#endif
-void IoClose(Io *io);
 
 // Io abstraction - general
+void IoClose(Io *io);
 inline bool IoSeek(const Io *io, IoSeekType type, long long offset);
 inline bool IoSkip(const Io *io, long long offset);
 inline long long IoSize(const Io *io);
@@ -355,10 +355,10 @@ inline double IoReadDle(const Io *io) {
 }
 
 //-----------------------------------------------------------------------------------------------------------
-inline bool IoReadRaw(const Io *io, size_t size, void *pOut) {
-	if (size == 0)
+inline bool IoReadRaw(const Io *io, size_t bytes, void *pOut) {
+	if (bytes == 0)
 		return true;
-	return io->funcRead(io->handle, size, pOut);
+	return io->funcRead(io->handle, bytes, pOut);
 }
 
 //-----------------------------------------------------------------------------------------------------------
@@ -1140,10 +1140,9 @@ namespace saw {
 	}
 
 	//-----------------------------------------------------------------------------------------------------------
-#ifndef SAW_IO_NO_VECTOR
-	bool IoOpenVec(Io *io, std::vector<char> *pVec) {
+	bool IoOpenVec(Io *io, std::vector<unsigned char> *pVec) {
 		struct VecHandle {
-			std::vector<char> *pVec;
+			std::vector<unsigned char> *pVec;
 			size_t pos;
 		};
 
@@ -1211,7 +1210,7 @@ namespace saw {
 	bool IoOpenFileInMem(Io *io, const std::string &filename, IoAccessType access) {
 		struct FileMemHandle {
 			Io ioMem;
-			std::vector<char> mem;
+			std::vector<unsigned char> mem;
 			bool closeWrite;
 		};
 
@@ -1266,7 +1265,6 @@ namespace saw {
 
 		return true;
 	}
-#endif
 
 	//-----------------------------------------------------------------------------------------------------------
 	void IoClose(Io *io) {
@@ -2187,6 +2185,28 @@ namespace saw {
 #endif
 
 		return true;
+	}
+
+	//-----------------------------------------------------------------------------------------------------------
+	bool FsLoadTextFile(const std::string &filename, std::string *pOut) {
+		Io io;
+		if (!IoOpenFile(&io, filename, IO_ACCESS_R))
+			return false;
+		bool ret = IoReadText8(&io, pOut, -1);
+		IoClose(&io);
+		return ret;
+	}
+
+	//-----------------------------------------------------------------------------------------------------------
+	bool FsLoadBinFile(const std::string &filename, std::vector<unsigned char> *pVec) {
+		Io io;
+		if (!IoOpenFile(&io, filename, IO_ACCESS_R))
+			return false;
+		long long size = IoSize(&io);
+		pVec->resize(static_cast<size_t>(size));
+		bool ret = IoReadRaw(&io, size, &((*pVec)[0]));
+		IoClose(&io);
+		return ret;
 	}
 
 }  // namespace
